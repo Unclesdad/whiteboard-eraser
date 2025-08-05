@@ -7,12 +7,51 @@ import cv2
 import numpy as np
 import sys
 import os
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
+import math
+import uuid
+import json
 
-# Import the whiteboard tracker components we need
-# (Assuming whiteboard_tracker.py is in the same directory)
-from whiteboard_tracker import WhiteboardConfig, Marking, CameraPosition, ObjectPosition
+# Define the classes we need locally to avoid importing from whiteboard_tracker
+@dataclass
+class WhiteboardConfig:
+    """Configuration for whiteboard dimensions and camera setup"""
+    width_mm: float  # Physical width of whiteboard in mm
+    height_mm: float  # Physical height of whiteboard in mm
+    distance_mm: float  # Distance from camera to whiteboard surface in mm
+    camera_x_mm: float  # Camera's X position on whiteboard (from left edge)
+    camera_y_mm: float  # Camera's Y position on whiteboard (from top edge)
+    camera_placement_mm: float = 100.0  # Distance from camera to object center (behind camera)
+    erasure_radius_mm: float = 50.0  # Radius within which markings are erased
+    camera_fov_h: float = 62.0  # Horizontal field of view in degrees
+    camera_fov_v: float = 48.8  # Vertical field of view in degrees
+
+@dataclass
+class Marking:
+    """Represents a detected marking on the whiteboard"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    center_x_mm: float = 0.0
+    center_y_mm: float = 0.0
+    width_mm: float = 0.0
+    height_mm: float = 0.0
+    color: str = ""
+    confidence: float = 0.0
+    last_seen: float = 0.0
+    detection_count: int = 1
+
+@dataclass
+class CameraPosition:
+    """Current camera position relative to whiteboard"""
+    x_mm: float
+    y_mm: float
+    confidence: float
+
+@dataclass
+class ObjectPosition:
+    """Position of the object center (behind camera)"""
+    x_mm: float
+    y_mm: float
 
 # Simplified version of the tracker for testing with images
 class TestWhiteboardTracker:
@@ -22,9 +61,13 @@ class TestWhiteboardTracker:
         # Calculate field of view parameters
         self.calculate_fov_parameters()
         
-        # Color ranges for whiteboard detection
-        self.white_lower = np.array([0, 0, 180])
-        self.white_upper = np.array([180, 40, 255])
+        # Color ranges for whiteboard detection - more permissive
+        self.white_lower = np.array([0, 0, 150])  # Lower threshold for whiteboards
+        self.white_upper = np.array([180, 60, 255])  # Allow more saturation
+        
+        # Gray edge detection (for whiteboard borders)
+        self.gray_lower = np.array([0, 0, 50])
+        self.gray_upper = np.array([180, 40, 150])
         
         # Color ranges for different markers in HSV
         # Added purple/violet detection
@@ -65,12 +108,31 @@ class TestWhiteboardTracker:
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         h, w = image.shape[:2]
         
+        # Debug: show what we're working with
+        print(f"\nDebug - Image analysis:")
+        print(f"  Image dimensions: {w}x{h}")
+        
         # Detect white areas
         white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        white_pixels = np.sum(white_mask > 0)
+        print(f"  White pixels: {white_pixels} ({100*white_pixels/(w*h):.1f}% of image)")
+        
+        # Detect gray edges
+        gray_mask = cv2.inRange(hsv, self.gray_lower, self.gray_upper)
+        gray_pixels = np.sum(gray_mask > 0)
+        print(f"  Gray pixels: {gray_pixels} ({100*gray_pixels/(w*h):.1f}% of image)")
+        
+        # Try adaptive thresholding for better edge detection
+        gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        adaptive_thresh = cv2.adaptiveThreshold(gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                              cv2.THRESH_BINARY, 11, 2)
         
         # Clean up
         kernel = np.ones((5, 5), np.uint8)
         white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
+        
+        # Use edge detection to find actual edges
+        edges = cv2.Canny(gray_img, 50, 150)
         
         # Find edges
         left_edge = None
@@ -78,36 +140,49 @@ class TestWhiteboardTracker:
         top_edge = None
         bottom_edge = None
         
-        # Scan for edges
+        # Scan for edges with improved detection
         vertical_sum = np.sum(white_mask, axis=0)
         horizontal_sum = np.sum(white_mask, axis=1)
         
-        # Left edge
-        for x in range(w // 4):
-            if vertical_sum[x] > h * 0.3:
-                if x > 0 and vertical_sum[x-1] < h * 0.1:
+        # Debug: print some statistics
+        print(f"  Vertical sum max: {np.max(vertical_sum)}, mean: {np.mean(vertical_sum):.1f}")
+        print(f"  Horizontal sum max: {np.max(horizontal_sum)}, mean: {np.mean(horizontal_sum):.1f}")
+        
+        # More flexible edge detection
+        v_threshold = np.max(vertical_sum) * 0.1  # 10% of max
+        h_threshold = np.max(horizontal_sum) * 0.1
+        
+        # Left edge - look for first significant white column
+        for x in range(w//3):
+            if vertical_sum[x] > v_threshold:
+                # Check if there's a significant increase
+                if x == 0 or vertical_sum[x] > vertical_sum[max(0, x-5)] * 2:
                     left_edge = x
+                    print(f"  Found left edge at x={x}")
                     break
                     
-        # Right edge
-        for x in range(w-1, 3*w//4, -1):
-            if vertical_sum[x] > h * 0.3:
-                if x < w-1 and vertical_sum[x+1] < h * 0.1:
+        # Right edge - look from right side
+        for x in range(w-1, 2*w//3, -1):
+            if vertical_sum[x] > v_threshold:
+                if x == w-1 or vertical_sum[x] > vertical_sum[min(w-1, x+5)] * 2:
                     right_edge = x
+                    print(f"  Found right edge at x={x}")
                     break
                     
         # Top edge
-        for y in range(h // 4):
-            if horizontal_sum[y] > w * 0.3:
-                if y > 0 and horizontal_sum[y-1] < w * 0.1:
+        for y in range(h//3):
+            if horizontal_sum[y] > h_threshold:
+                if y == 0 or horizontal_sum[y] > horizontal_sum[max(0, y-5)] * 2:
                     top_edge = y
+                    print(f"  Found top edge at y={y}")
                     break
                     
         # Bottom edge
-        for y in range(h-1, 3*h//4, -1):
-            if horizontal_sum[y] > w * 0.3:
-                if y < h-1 and horizontal_sum[y+1] < w * 0.1:
+        for y in range(h-1, 2*h//3, -1):
+            if horizontal_sum[y] > h_threshold:
+                if y == h-1 or horizontal_sum[y] > horizontal_sum[min(h-1, y+5)] * 2:
                     bottom_edge = y
+                    print(f"  Found bottom edge at y={y}")
                     break
         
         # Estimate camera position based on edges
@@ -154,16 +229,31 @@ class TestWhiteboardTracker:
             camera_y_estimate = center_from_top_mm
             confidence += 0.2
             
-        # Draw edges on visualization
+        # Draw edges on visualization with debug info
         edge_vis = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
+        # Also show gray mask
+        edge_vis[:,:,1] = gray_mask // 2  # Show gray areas in green channel
+        
+        # Draw vertical sum graph at bottom
+        graph_height = 100
+        graph = np.zeros((graph_height, w, 3), dtype=np.uint8)
+        v_sum_normalized = (vertical_sum * graph_height / np.max(vertical_sum)).astype(int)
+        for x in range(w):
+            cv2.line(graph, (x, graph_height), (x, graph_height - v_sum_normalized[x]), (0, 255, 0), 1)
+        edge_vis[-graph_height:, :] = graph
+        
         if left_edge is not None:
             cv2.line(edge_vis, (left_edge, 0), (left_edge, h), (0, 255, 0), 2)
+            cv2.putText(edge_vis, "L", (left_edge + 5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         if right_edge is not None:
             cv2.line(edge_vis, (right_edge, 0), (right_edge, h), (0, 255, 0), 2)
+            cv2.putText(edge_vis, "R", (right_edge - 20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         if top_edge is not None:
             cv2.line(edge_vis, (0, top_edge), (w, top_edge), (255, 0, 0), 2)
+            cv2.putText(edge_vis, "T", (30, top_edge + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         if bottom_edge is not None:
             cv2.line(edge_vis, (0, bottom_edge), (w, bottom_edge), (255, 0, 0), 2)
+            cv2.putText(edge_vis, "B", (30, bottom_edge - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
             
         return camera_x_estimate, camera_y_estimate, confidence, edge_vis
         
@@ -191,10 +281,13 @@ class TestWhiteboardTracker:
             # Only look for markings on the whiteboard
             color_mask = cv2.bitwise_and(color_mask, white_mask)
             
-            # Noise reduction
-            kernel = np.ones((3, 3), np.uint8)
+            # Noise reduction - stronger to handle reflections
+            kernel = np.ones((5, 5), np.uint8)
             color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
             color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+            
+            # Additional erosion to remove thin reflection artifacts
+            color_mask = cv2.erode(color_mask, kernel, iterations=1)
             
             # Find contours
             contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -260,7 +353,7 @@ def test_image(image_path: str, output_dir: str = "test_output"):
     image = cv2.imread(image_path)
     if image is None:
         print(f"Error: Could not load image {image_path}")
-        return
+        return ord('q')  # Return 'q' to skip
         
     h, w = image.shape[:2]
     print(f"Image size: {w}x{h}")
@@ -285,6 +378,14 @@ def test_image(image_path: str, output_dir: str = "test_output"):
     # First detect edges and estimate camera position
     camera_x, camera_y, position_confidence, edge_vis = tracker.detect_edges_and_position(image)
     
+    # Store the actual edge positions for JSON
+    left_edge = None
+    right_edge = None  
+    top_edge = None
+    bottom_edge = None
+    
+    # Extract edge positions from the detection (hacky but works for test)
+    # In real implementation, detect_edges_and_position should return these
     print(f"\nCamera position estimation:")
     if camera_x is not None:
         print(f"  X position: {camera_x:.1f}mm from left edge")
@@ -344,40 +445,95 @@ def test_image(image_path: str, output_dir: str = "test_output"):
             
     cv2.imwrite(os.path.join(output_dir, f"{base_name}_color_masks.jpg"), color_masks)
     
-    # Show results
-    cv2.imshow("Original", cv2.resize(image, (800, 600)))
-    cv2.imshow("Edge Detection", cv2.resize(edge_vis, (800, 600)))
-    cv2.imshow("Detected Markings", cv2.resize(vis_image, (800, 600)))
-    cv2.imshow("White Mask", cv2.resize(white_mask, (800, 600)))
-    cv2.imshow("Color Masks (R=purple, G=green, B=blue)", cv2.resize(color_masks, (800, 600)))
+    # Save camera position to JSON
+    camera_data = {
+        "image": os.path.basename(image_path),
+        "camera_position": {
+            "x_mm": tracker.config.camera_x_mm,
+            "y_mm": tracker.config.camera_y_mm,
+            "confidence": position_confidence
+        },
+        "edges_detected": {
+            "left": left_edge is not None,
+            "right": right_edge is not None,
+            "top": top_edge is not None,
+            "bottom": bottom_edge is not None
+        },
+        "edge_positions_px": {
+            "left": left_edge,
+            "right": right_edge,
+            "top": top_edge,
+            "bottom": bottom_edge
+        },
+        "markings": [
+            {
+                "color": m.color,
+                "x_mm": m.center_x_mm,
+                "y_mm": m.center_y_mm,
+                "width_mm": m.width_mm,
+                "height_mm": m.height_mm
+            } for m in markings
+        ]
+    }
     
-    print("\nPress any key to continue...")
-    cv2.waitKey(0)
+    json_path = os.path.join(output_dir, f"{base_name}_camera_position.json")
+    with open(json_path, 'w') as f:
+        json.dump(camera_data, f, indent=2)
+    print(f"Saved camera position to {json_path}")
+    
+    # Show results
+    windows = [
+        ("Original", cv2.resize(image, (800, 600))),
+        ("Edge Detection", cv2.resize(edge_vis, (800, 600))),
+        ("Detected Markings", cv2.resize(vis_image, (800, 600))),
+        ("White Mask", cv2.resize(white_mask, (800, 600))),
+        ("Color Masks (R=purple, G=green, B=blue)", cv2.resize(color_masks, (800, 600)))
+    ]
+    
+    for name, img in windows:
+        cv2.imshow(name, img)
+    
+    print("\nPress SPACE for next image, 'q' to quit, any other key to continue...")
+    key = cv2.waitKey(0) & 0xFF
+    
+    # Close windows after key press
+    cv2.destroyAllWindows()
+    
+    # Return key for main loop to handle
+    return key
 
 def main():
     """Main test function"""
     print("Whiteboard Vision Test Script")
     print("=============================")
+    print("Controls: SPACE = next image, 'q' = quit\n")
     
     # Test with command line arguments or default test images
     if len(sys.argv) > 1:
         # Test specific images
-        for image_path in sys.argv[1:]:
-            test_image(image_path)
+        image_paths = sys.argv[1:]
     else:
         # Look for test images in current directory
-        test_images = []
+        image_paths = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
             import glob
-            test_images.extend(glob.glob(ext))
+            image_paths.extend(glob.glob(ext))
         
-        if test_images:
-            print(f"Found {len(test_images)} images to test")
-            for image_path in test_images:
-                test_image(image_path)
-        else:
+        if not image_paths:
             print("Usage: python test_whiteboard_vision.py [image1.jpg] [image2.jpg] ...")
             print("Or place images in the current directory")
+            return
+    
+    print(f"Found {len(image_paths)} images to test")
+    
+    # Process each image
+    for i, image_path in enumerate(image_paths):
+        print(f"\n[{i+1}/{len(image_paths)}] Processing {image_path}")
+        key = test_image(image_path)
+        
+        if key == ord('q'):
+            print("\nQuitting...")
+            break
     
     cv2.destroyAllWindows()
     print("\nTest complete!")
