@@ -193,6 +193,8 @@ class TestWhiteboardTracker:
         edges_bottom[:h//3, :] = 0  # Mask out top third
         
         lines = cv2.HoughLinesP(edges_bottom, 1, np.pi/180, threshold=80, minLineLength=80, maxLineGap=20)
+        
+        if lines is not None:
             # Find the two most prominent perpendicular lines
             vertical_lines = []
             horizontal_lines = []
