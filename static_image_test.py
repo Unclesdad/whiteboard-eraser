@@ -122,23 +122,24 @@ class TestWhiteboardTracker:
         gray_pixels = np.sum(gray_mask > 0)
         print(f"  Gray pixels: {gray_pixels} ({100*gray_pixels/(w*h):.1f}% of image)")
         
-        # Try adaptive thresholding for better edge detection
-        gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        adaptive_thresh = cv2.adaptiveThreshold(gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                              cv2.THRESH_BINARY, 11, 2)
-        
         # Clean up
         kernel = np.ones((5, 5), np.uint8)
         white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
         
-        # Use edge detection to find actual edges
-        edges = cv2.Canny(gray_img, 50, 150)
+        # Use Hough Line detection to find straight edges
+        edges = cv2.Canny(white_mask, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
         
         # Find edges
         left_edge = None
         right_edge = None
         top_edge = None
         bottom_edge = None
+        
+        # Also find corner if two edges meet
+        corner_x = None
+        corner_y = None
+        angle = None
         
         # Scan for edges with improved detection
         vertical_sum = np.sum(white_mask, axis=0)
@@ -152,38 +153,167 @@ class TestWhiteboardTracker:
         v_threshold = np.max(vertical_sum) * 0.1  # 10% of max
         h_threshold = np.max(horizontal_sum) * 0.1
         
-        # Left edge - look for first significant white column
+        # Left edge - look for first significant white column (prioritize bottom half)
         for x in range(w//3):
-            if vertical_sum[x] > v_threshold:
-                # Check if there's a significant increase
-                if x == 0 or vertical_sum[x] > vertical_sum[max(0, x-5)] * 2:
-                    left_edge = x
-                    print(f"  Found left edge at x={x}")
-                    break
+            # Check bottom half first
+            bottom_sum = np.sum(white_mask[h//2:, x])
+            if bottom_sum > (h//2) * 0.3:  # At least 30% white in bottom half
+                left_edge = x
+                print(f"  Found left edge at x={x}")
+                break
                     
-        # Right edge - look from right side
+        # Right edge - look from right side (prioritize bottom half)
         for x in range(w-1, 2*w//3, -1):
-            if vertical_sum[x] > v_threshold:
-                if x == w-1 or vertical_sum[x] > vertical_sum[min(w-1, x+5)] * 2:
-                    right_edge = x
-                    print(f"  Found right edge at x={x}")
-                    break
+            bottom_sum = np.sum(white_mask[h//2:, x])
+            if bottom_sum > (h//2) * 0.3:
+                right_edge = x
+                print(f"  Found right edge at x={x}")
+                break
                     
-        # Top edge
-        for y in range(h//3):
+        # Top edge - this is the top of the whiteboard, search from bottom up
+        for y in range(h-1, h//3, -1):  # Start from bottom, go up
             if horizontal_sum[y] > h_threshold:
-                if y == 0 or horizontal_sum[y] > horizontal_sum[max(0, y-5)] * 2:
+                # Look for where whiteboard starts (transition from non-white to white)
+                if y < h-1 and horizontal_sum[y+1] < horizontal_sum[y] * 0.5:
                     top_edge = y
                     print(f"  Found top edge at y={y}")
                     break
                     
-        # Bottom edge
+        # Bottom edge - usually at the very bottom of frame
+        # Start from bottom and look for last row with significant white
         for y in range(h-1, 2*h//3, -1):
             if horizontal_sum[y] > h_threshold:
-                if y == h-1 or horizontal_sum[y] > horizontal_sum[min(h-1, y+5)] * 2:
-                    bottom_edge = y
-                    print(f"  Found bottom edge at y={y}")
-                    break
+                bottom_edge = y
+                print(f"  Found bottom edge at y={y}")
+                break
+        
+        # Try to detect corner and angle from Hough lines
+        # Focus on lines in the bottom 2/3 of the image
+        edges_bottom = edges.copy()
+        edges_bottom[:h//3, :] = 0  # Mask out top third
+        
+        lines = cv2.HoughLinesP(edges_bottom, 1, np.pi/180, threshold=80, minLineLength=80, maxLineGap=20)
+            # Find the two most prominent perpendicular lines
+            vertical_lines = []
+            horizontal_lines = []
+            
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle_rad = np.arctan2(y2 - y1, x2 - x1)
+                angle_deg = np.degrees(angle_rad)
+                
+                # Classify as vertical or horizontal
+                if abs(angle_deg) > 45 or abs(angle_deg) < -45:
+                    vertical_lines.append((x1, y1, x2, y2, angle_rad))
+                else:
+                    horizontal_lines.append((x1, y1, x2, y2, angle_rad))
+            
+            # If we have both vertical and horizontal lines, find intersection
+            if vertical_lines and horizontal_lines:
+                # Take the longest lines
+                v_line = max(vertical_lines, key=lambda l: (l[2]-l[0])**2 + (l[3]-l[1])**2)
+                h_line = max(horizontal_lines, key=lambda l: (l[2]-l[0])**2 + (l[3]-l[1])**2)
+                
+                # Find intersection point (simplified - assumes lines are nearly perpendicular)
+                corner_x = (v_line[0] + v_line[2]) // 2
+                corner_y = (h_line[1] + h_line[3]) // 2
+                
+                # Calculate angle based on which edges we see
+                if left_edge is not None and top_edge is not None:
+                    angle = 45  # Looking at top-left corner
+                elif right_edge is not None and top_edge is not None:
+                    angle = 315  # Looking at top-right corner
+                elif left_edge is not None and bottom_edge is not None:
+                    angle = 135  # Looking at bottom-left corner
+                elif right_edge is not None and bottom_edge is not None:
+                    angle = 225  # Looking at bottom-right corner
+                    
+        # Estimate camera position based on edges
+        camera_x_estimate = None
+        camera_y_estimate = None
+        confidence = 0.0
+        
+        pixels_per_mm_h = w / self.fov_width_at_board
+        pixels_per_mm_v = h / self.fov_height_at_board
+        
+        if left_edge is not None and right_edge is not None:
+            # Both edges visible - camera is between them
+            visible_width_px = right_edge - left_edge
+            visible_width_mm = visible_width_px / pixels_per_mm_h
+            
+            # Distance from left edge in pixels
+            center_from_left_px = (w / 2) - left_edge
+            center_from_left_mm = center_from_left_px / pixels_per_mm_h
+            
+            camera_x_estimate = center_from_left_mm
+            confidence += 0.8
+            print(f"Both horizontal edges visible: camera estimated at {camera_x_estimate:.1f}mm from left edge")
+            
+        elif left_edge is not None:
+            # Only left edge visible
+            edge_from_center_px = left_edge - (w / 2)
+            edge_from_center_mm = edge_from_center_px / pixels_per_mm_h
+            camera_x_estimate = -edge_from_center_mm
+            confidence += 0.4
+            print(f"Left edge visible: camera estimated at {camera_x_estimate:.1f}mm from left edge")
+            
+        elif right_edge is not None:
+            # Only right edge visible
+            edge_from_center_px = right_edge - (w / 2)
+            edge_from_center_mm = edge_from_center_px / pixels_per_mm_h
+            camera_x_estimate = self.config.width_mm - (-edge_from_center_mm)
+            confidence += 0.4
+            print(f"Right edge visible: camera estimated at {camera_x_estimate:.1f}mm from left edge")
+        
+        # Similar for vertical position
+        if top_edge is not None and bottom_edge is not None:
+            center_from_top_px = (h / 2) - top_edge
+            center_from_top_mm = center_from_top_px / pixels_per_mm_v
+            camera_y_estimate = center_from_top_mm
+            confidence += 0.2
+            
+        # Draw edges on visualization with debug info
+        edge_vis = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
+        # Also show gray mask
+        edge_vis[:,:,1] = gray_mask // 2  # Show gray areas in green channel
+        
+        # Draw Hough lines if found
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(edge_vis, (x1, y1), (x2, y2), (255, 255, 0), 1)
+        
+        # Draw vertical sum graph at bottom
+        graph_height = 100
+        graph = np.zeros((graph_height, w, 3), dtype=np.uint8)
+        if np.max(vertical_sum) > 0:
+            v_sum_normalized = (vertical_sum * graph_height / np.max(vertical_sum)).astype(int)
+            for x in range(w):
+                cv2.line(graph, (x, graph_height), (x, graph_height - v_sum_normalized[x]), (0, 255, 0), 1)
+        edge_vis[-graph_height:, :] = graph
+        
+        if left_edge is not None:
+            cv2.line(edge_vis, (left_edge, 0), (left_edge, h), (0, 255, 0), 2)
+            cv2.putText(edge_vis, "L", (left_edge + 5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        if right_edge is not None:
+            cv2.line(edge_vis, (right_edge, 0), (right_edge, h), (0, 255, 0), 2)
+            cv2.putText(edge_vis, "R", (right_edge - 20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        if top_edge is not None:
+            cv2.line(edge_vis, (0, top_edge), (w, top_edge), (255, 0, 0), 2)
+            cv2.putText(edge_vis, "T", (30, top_edge + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        if bottom_edge is not None:
+            cv2.line(edge_vis, (0, bottom_edge), (w, bottom_edge), (255, 0, 0), 2)
+            cv2.putText(edge_vis, "B", (30, bottom_edge - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            
+        # Draw corner if found
+        if corner_x is not None and corner_y is not None:
+            cv2.circle(edge_vis, (corner_x, corner_y), 10, (0, 0, 255), -1)
+            cv2.putText(edge_vis, f"Corner {angle}°", (corner_x + 15, corner_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+        # Return all edge information
+        return (camera_x_estimate, camera_y_estimate, confidence, edge_vis, 
+                left_edge, right_edge, top_edge, bottom_edge, angle)
         
         # Estimate camera position based on edges
         camera_x_estimate = None
@@ -281,13 +411,15 @@ class TestWhiteboardTracker:
             # Only look for markings on the whiteboard
             color_mask = cv2.bitwise_and(color_mask, white_mask)
             
-            # Noise reduction - stronger to handle reflections
-            kernel = np.ones((5, 5), np.uint8)
-            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
+            # Noise reduction - lighter touch to preserve thin lines
+            kernel = np.ones((3, 3), np.uint8)
             color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+            # Skip erosion to preserve thin lines
             
-            # Additional erosion to remove thin reflection artifacts
-            color_mask = cv2.erode(color_mask, kernel, iterations=1)
+            # Focus on bottom portion of image where whiteboard is
+            # Give more weight to markings in the bottom 2/3 of the image
+            weight_mask = np.ones_like(color_mask)
+            weight_mask[:h//3, :] = 0.5  # Reduce weight for top third
             
             # Find contours
             contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -376,16 +508,10 @@ def test_image(image_path: str, output_dir: str = "test_output"):
     tracker = TestWhiteboardTracker(config)
     
     # First detect edges and estimate camera position
-    camera_x, camera_y, position_confidence, edge_vis = tracker.detect_edges_and_position(image)
-    
-    # Store the actual edge positions for JSON
-    left_edge = None
-    right_edge = None  
-    top_edge = None
-    bottom_edge = None
-    
-    # Extract edge positions from the detection (hacky but works for test)
-    # In real implementation, detect_edges_and_position should return these
+    result = tracker.detect_edges_and_position(image)
+    camera_x, camera_y, position_confidence, edge_vis = result[:4]
+    left_edge, right_edge, top_edge, bottom_edge = result[4:8]
+    angle = result[8] if len(result) > 8 else None
     print(f"\nCamera position estimation:")
     if camera_x is not None:
         print(f"  X position: {camera_x:.1f}mm from left edge")
@@ -451,6 +577,7 @@ def test_image(image_path: str, output_dir: str = "test_output"):
         "camera_position": {
             "x_mm": tracker.config.camera_x_mm,
             "y_mm": tracker.config.camera_y_mm,
+            "angle_degrees": angle if angle is not None else 0,
             "confidence": position_confidence
         },
         "edges_detected": {
