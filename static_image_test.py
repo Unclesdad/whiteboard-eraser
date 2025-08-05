@@ -194,6 +194,9 @@ class TestWhiteboardTracker:
         
         lines = cv2.HoughLinesP(edges_bottom, 1, np.pi/180, threshold=80, minLineLength=80, maxLineGap=20)
         
+        # Calculate angle from edge orientations
+        edge_angles = []
+        
         if lines is not None:
             # Find the two most prominent perpendicular lines
             vertical_lines = []
@@ -204,11 +207,15 @@ class TestWhiteboardTracker:
                 angle_rad = np.arctan2(y2 - y1, x2 - x1)
                 angle_deg = np.degrees(angle_rad)
                 
+                # Store line info
+                line_info = (x1, y1, x2, y2, angle_rad, angle_deg)
+                
                 # Classify as vertical or horizontal
                 if abs(angle_deg) > 45 or abs(angle_deg) < -45:
-                    vertical_lines.append((x1, y1, x2, y2, angle_rad))
+                    vertical_lines.append(line_info)
                 else:
-                    horizontal_lines.append((x1, y1, x2, y2, angle_rad))
+                    horizontal_lines.append(line_info)
+                    edge_angles.append(angle_deg)
             
             # If we have both vertical and horizontal lines, find intersection
             if vertical_lines and horizontal_lines:
@@ -220,15 +227,22 @@ class TestWhiteboardTracker:
                 corner_x = (v_line[0] + v_line[2]) // 2
                 corner_y = (h_line[1] + h_line[3]) // 2
                 
-                # Calculate angle based on which edges we see
+                # Calculate camera angle based on the horizontal edge angle
+                # If edge is tilted, camera is looking at an angle
+                h_angle = h_line[5]  # Angle in degrees
+                
+                # Adjust for which corner we're seeing
                 if left_edge is not None and top_edge is not None:
-                    angle = 45  # Looking at top-left corner
+                    angle = 45 - h_angle  # Looking at top-left corner
                 elif right_edge is not None and top_edge is not None:
-                    angle = 315  # Looking at top-right corner
+                    angle = 315 + h_angle  # Looking at top-right corner
                 elif left_edge is not None and bottom_edge is not None:
-                    angle = 135  # Looking at bottom-left corner
+                    angle = 135 + h_angle  # Looking at bottom-left corner
                 elif right_edge is not None and bottom_edge is not None:
-                    angle = 225  # Looking at bottom-right corner
+                    angle = 225 - h_angle  # Looking at bottom-right corner
+                else:
+                    # Use average edge angle
+                    angle = np.mean(edge_angles) if edge_angles else 0
                     
         # Estimate camera position based on edges
         camera_x_estimate = None
@@ -238,7 +252,16 @@ class TestWhiteboardTracker:
         pixels_per_mm_h = w / self.fov_width_at_board
         pixels_per_mm_v = h / self.fov_height_at_board
         
-        if left_edge is not None and right_edge is not None:
+        # Only claim we found position if we actually detected edges
+        edges_found = sum([left_edge is not None, right_edge is not None, 
+                          top_edge is not None, bottom_edge is not None])
+        
+        if edges_found == 0:
+            # No edges found - no position estimate
+            confidence = 0.0
+            print("  No edges detected - cannot estimate position")
+            
+        elif left_edge is not None and right_edge is not None:
             # Both edges visible - camera is between them
             visible_width_px = right_edge - left_edge
             visible_width_mm = visible_width_px / pixels_per_mm_h
@@ -248,7 +271,7 @@ class TestWhiteboardTracker:
             center_from_left_mm = center_from_left_px / pixels_per_mm_h
             
             camera_x_estimate = center_from_left_mm
-            confidence += 0.8
+            confidence = 0.8
             print(f"Both horizontal edges visible: camera estimated at {camera_x_estimate:.1f}mm from left edge")
             
         elif left_edge is not None:
@@ -256,7 +279,7 @@ class TestWhiteboardTracker:
             edge_from_center_px = left_edge - (w / 2)
             edge_from_center_mm = edge_from_center_px / pixels_per_mm_h
             camera_x_estimate = -edge_from_center_mm
-            confidence += 0.4
+            confidence = 0.4
             print(f"Left edge visible: camera estimated at {camera_x_estimate:.1f}mm from left edge")
             
         elif right_edge is not None:
@@ -264,7 +287,7 @@ class TestWhiteboardTracker:
             edge_from_center_px = right_edge - (w / 2)
             edge_from_center_mm = edge_from_center_px / pixels_per_mm_h
             camera_x_estimate = self.config.width_mm - (-edge_from_center_mm)
-            confidence += 0.4
+            confidence = 0.4
             print(f"Right edge visible: camera estimated at {camera_x_estimate:.1f}mm from left edge")
         
         # Similar for vertical position
@@ -272,7 +295,13 @@ class TestWhiteboardTracker:
             center_from_top_px = (h / 2) - top_edge
             center_from_top_mm = center_from_top_px / pixels_per_mm_v
             camera_y_estimate = center_from_top_mm
-            confidence += 0.2
+            confidence = min(1.0, confidence + 0.2)
+        elif top_edge is not None:
+            # Only top edge visible
+            edge_from_center_px = top_edge - (h / 2)
+            edge_from_center_mm = edge_from_center_px / pixels_per_mm_v
+            camera_y_estimate = -edge_from_center_mm
+            confidence = min(1.0, confidence + 0.1)
             
         # Draw edges on visualization with debug info
         edge_vis = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
@@ -496,6 +525,7 @@ def test_image(image_path: str, output_dir: str = "test_output"):
     os.makedirs(output_dir, exist_ok=True)
     
     # Configure for test (camera at 135mm = 13.5cm height)
+    # Create fresh config for each image to avoid information leak
     config = WhiteboardConfig(
         width_mm=2000.0,    # Approximate whiteboard size
         height_mm=1000.0,   
@@ -506,7 +536,7 @@ def test_image(image_path: str, output_dir: str = "test_output"):
         erasure_radius_mm=50.0
     )
     
-    # Create tracker
+    # Create fresh tracker for each image
     tracker = TestWhiteboardTracker(config)
     
     # First detect edges and estimate camera position
@@ -521,8 +551,9 @@ def test_image(image_path: str, output_dir: str = "test_output"):
         tracker.config.camera_x_mm = camera_x
     else:
         print(f"  X position: Could not determine (no edges visible)")
-        # Use center as fallback
+        # Use center as fallback but mark low confidence
         tracker.config.camera_x_mm = config.width_mm / 2
+        position_confidence = 0.0  # Override confidence
         
     if camera_y is not None:
         print(f"  Y position: {camera_y:.1f}mm from top edge")
@@ -530,6 +561,8 @@ def test_image(image_path: str, output_dir: str = "test_output"):
     else:
         print(f"  Y position: Could not determine (no horizontal edges visible)")
         tracker.config.camera_y_mm = config.height_mm / 2
+        if position_confidence > 0:
+            position_confidence *= 0.5  # Reduce confidence if missing Y
         
     print(f"  Confidence: {position_confidence:.2f}")
     
