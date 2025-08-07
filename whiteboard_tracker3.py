@@ -88,12 +88,12 @@ class WhiteboardEdgeDetector:
     
     def create_edge_detection_regions(self, surface_mask: np.ndarray) -> np.ndarray:
         """
-        Create focused boundary region for edge detection
+        Create focused boundary region for edge detection - more generous for frame detection
         """
         # Create boundary region around the whiteboard surface
-        kernel = np.ones((15, 15), np.uint8)
+        kernel = np.ones((25, 25), np.uint8)  # Larger kernel for wider boundary region
         eroded = cv2.erode(surface_mask, kernel, iterations=1)
-        dilated = cv2.dilate(surface_mask, kernel, iterations=2)
+        dilated = cv2.dilate(surface_mask, kernel, iterations=3)  # More dilation
         boundary_region = cv2.subtract(dilated, eroded)
         
         pixels = np.sum(boundary_region > 0)
@@ -118,7 +118,7 @@ class WhiteboardEdgeDetector:
         # 1. Remove small connected components (likely text/small drawings)
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(boundary_edges, connectivity=8)
         
-        min_component_size = 15  # Minimum size for a structural edge component
+        min_component_size = 8  # Reduced - was too strict
         filtered_edges = np.zeros_like(boundary_edges)
         
         structural_components = 0
@@ -132,17 +132,18 @@ class WhiteboardEdgeDetector:
             # - Elongated shape (frame edges should be long and thin)
             aspect_ratio = max(width, height) / max(min(width, height), 1)
             
-            # More strict criteria for structural edges
-            if area >= min_component_size and aspect_ratio > 2.5:  # Long and thin
+            # Relaxed criteria for structural edges
+            if area >= min_component_size and aspect_ratio > 1.5:  # More lenient aspect ratio
                 # Additional check: should be near image edges or be very linear
                 x = stats[i, cv2.CC_STAT_LEFT]
                 y = stats[i, cv2.CC_STAT_TOP]
                 
-                # Structural edges are typically near image boundaries
-                near_boundary = (x < w * 0.15 or x + width > w * 0.85 or 
-                               y < h * 0.15 or y + height > h * 0.85)
+                # More lenient boundary check - whiteboard edges can be anywhere
+                near_boundary = (x < w * 0.25 or x + width > w * 0.75 or 
+                               y < h * 0.25 or y + height > h * 0.75)
                 
-                if near_boundary or aspect_ratio > 4:  # Very elongated or near boundary
+                # Accept if reasonably elongated OR near boundary OR large enough
+                if near_boundary or aspect_ratio > 3 or area > 30:
                     component_mask = (labels == i)
                     filtered_edges[component_mask] = 255
                     structural_components += 1
@@ -172,13 +173,19 @@ class WhiteboardEdgeDetector:
             approx = cv2.approxPolyDP(contour, epsilon, True)
             
             # Linear edges should approximate to very few points
-            if len(approx) <= 4:  # Very linear
+            if len(approx) <= 6:  # More lenient - was 4
                 cv2.drawContours(final_edges, [contour], -1, 255, -1)
                 linear_contours += 1
                 print(f"      Kept linear contour with {len(approx)} vertices")
             else:
                 area = cv2.contourArea(contour)
-                print(f"      Rejected curved contour with {len(approx)} vertices, area={area}")
+                # Keep larger contours even if not perfectly linear
+                if area > 50:  # Large contours might be frame edges
+                    cv2.drawContours(final_edges, [contour], -1, 255, -1)
+                    linear_contours += 1
+                    print(f"      Kept large contour with {len(approx)} vertices, area={area}")
+                else:
+                    print(f"      Rejected curved contour with {len(approx)} vertices, area={area}")
         
         print(f"    Linear contours kept: {linear_contours}/{len(contours)}")
         print(f"    Final filtered edges: {np.sum(final_edges > 0)}")
@@ -322,79 +329,195 @@ class WhiteboardEdgeDetector:
         else:
             return "other", "unknown", 0.0
     
-    def validate_whiteboard_geometry(self, lines: List[Tuple[float, float, float, int, str]], 
-                                   image_shape: Tuple[int, int]) -> List[Tuple[float, float, float, int, str]]:
+    def deduplicate_lines(self, lines: List[Tuple[float, float, float, int, str]]) -> List[Tuple[float, float, float, int, str]]:
         """
-        Validate lines based on whiteboard corner geometry - STRICT 2 LINE LIMIT
+        Remove duplicate lines early in the pipeline
         """
         if len(lines) <= 1:
             return lines
         
-        print(f"    Validating whiteboard geometry for {len(lines)} lines:")
+        unique_lines = []
+        
+        for rho, theta, support, hits, edge_type in lines:
+            angle_deg = np.degrees(theta)
+            
+            is_duplicate = False
+            for i, (existing_rho, existing_theta, existing_support, existing_hits, existing_type) in enumerate(unique_lines):
+                existing_angle = np.degrees(existing_theta)
+                
+                # Calculate differences
+                rho_diff = abs(rho - existing_rho)
+                angle_diff = min(abs(angle_deg - existing_angle), 
+                               abs(angle_deg - existing_angle + 180),
+                               abs(angle_deg - existing_angle - 180))
+                
+                # Lines are duplicates if both rho and angle are very similar
+                if rho_diff < 10 and angle_diff < 2:
+                    print(f"      Removing duplicate: rho_diff={rho_diff:.1f}, angle_diff={angle_diff:.1f}°")
+                    
+                    # Keep the one with better support
+                    if support > existing_support:
+                        # Replace existing with current (better) line
+                        unique_lines[i] = (rho, theta, support, hits, edge_type)
+                        print(f"        Replaced with better support ({support:.3f} > {existing_support:.3f})")
+                    else:
+                        print(f"        Kept existing with better support ({existing_support:.3f} > {support:.3f})")
+                    
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                unique_lines.append((rho, theta, support, hits, edge_type))
+        
+        print(f"    Deduplication: {len(lines)} → {len(unique_lines)} lines")
+        return unique_lines
+    
+    def validate_whiteboard_geometry(self, lines: List[Tuple[float, float, float, int, str]], 
+                                   image_shape: Tuple[int, int]) -> List[Tuple[float, float, float, int, str]]:
+        """
+        Sequential selection: Find best line first, then find second line with opposite slope sign
+        """
+        if len(lines) <= 1:
+            return lines
+        
+        print(f"    Sequential selection for {len(lines)} lines:")
         
         # SAFETY CHECK: Never process more than 10 lines
         if len(lines) > 10:
             print(f"    WARNING: Too many lines ({len(lines)}), limiting to top 10")
             lines = lines[:10]
         
-        # Classify all lines
-        classified_lines = []
-        for rho, theta, support, hits, edge_type in lines:
-            orientation, position, slope = self.classify_line_by_slope_and_position(rho, theta, image_shape)
-            classified_lines.append((rho, theta, support, hits, edge_type, orientation, position, slope))
+        # Helper function to calculate line slope consistently
+        def calculate_slope(theta):
+            # Convert from polar form (rho, theta) to Cartesian slope
+            # For line: x*cos(theta) + y*sin(theta) = rho
+            # Slope = -cos(theta)/sin(theta) when sin(theta) != 0
             
             angle_deg = np.degrees(theta)
-            print(f"      Line: rho={rho:.1f}, angle={angle_deg:.1f}°, {orientation}, {position}, slope={slope:.2f}")
-        
-        # If we have diagonal lines, apply whiteboard corner constraints
-        diagonal_lines = [line for line in classified_lines if line[5] == "diagonal"]
-        
-        if len(diagonal_lines) >= 2:
-            print(f"    Found {len(diagonal_lines)} diagonal lines - applying corner constraints")
+            sin_theta = np.sin(theta)
+            cos_theta = np.cos(theta)
             
-            # Separate by position and slope
-            left_positive = [line for line in diagonal_lines if line[6] == "left" and line[7] > 0]
-            right_negative = [line for line in diagonal_lines if line[6] == "right" and line[7] < 0]
+            print(f"        Debug slope calc: theta={angle_deg:.1f}°, sin={sin_theta:.3f}, cos={cos_theta:.3f}")
             
-            print(f"      Left positive slopes: {len(left_positive)}")
-            print(f"      Right negative slopes: {len(right_negative)}")
+            if abs(sin_theta) < 0.01:  # Nearly horizontal line (theta ≈ 0° or 180°)
+                return 0.0
+            elif abs(cos_theta) < 0.01:  # Nearly vertical line (theta ≈ 90° or 270°)
+                return float('inf')
+            else:
+                # Standard slope calculation
+                slope = -cos_theta / sin_theta
+                print(f"        Calculated slope: {slope:.3f}")
+                return slope
+        
+        # Helper function to determine slope sign more robustly
+        def get_slope_sign(slope, theta):
+            angle_deg = np.degrees(theta)
             
-            # Find the single best valid pair
-            if left_positive and right_negative:
-                # Sort each group by quality and take the best from each
-                left_positive.sort(key=lambda x: (x[2], x[3]), reverse=True)  # Sort by support, hits
-                right_negative.sort(key=lambda x: (x[2], x[3]), reverse=True)
+            # Use angle-based classification for better accuracy
+            if 85 <= angle_deg <= 95 or 265 <= angle_deg <= 275:  # Nearly vertical
+                return 'vertical'
+            elif abs(angle_deg) <= 5 or abs(angle_deg - 180) <= 5:  # Nearly horizontal
+                return 'horizontal'
+            elif 0 < angle_deg < 90 or 180 < angle_deg < 270:  # Positive slope quadrants
+                return 'positive'  
+            else:  # 90 < angle_deg < 180 or 270 < angle_deg < 360
+                return 'negative'
+        
+        # Sort all lines by quality (support ratio and edge hits)
+        sorted_lines = sorted(lines, key=lambda x: (x[2], x[3]), reverse=True)
+        
+        selected_lines = []
+        
+        # STEP 1: Select the BEST line (highest quality)
+        best_line = sorted_lines[0]
+        best_rho, best_theta, best_support, best_hits, best_type = best_line
+        best_slope = calculate_slope(best_theta)
+        best_slope_sign = get_slope_sign(best_slope, best_theta)
+        best_angle = np.degrees(best_theta)
+        
+        selected_lines.append(best_line)
+        print(f"    SELECTED Line 1 (BEST): rho={best_rho:.1f}, angle={best_angle:.1f}°, slope={best_slope:.3f} ({best_slope_sign}), support={best_support:.3f}")
+        
+        # STEP 2: Search for the best line with OPPOSITE slope sign
+        print(f"    Searching for line with opposite slope sign to '{best_slope_sign}'...")
+        
+        best_opposite = None
+        best_opposite_quality = -1
+        
+        for candidate in sorted_lines[1:]:  # Skip the first (already selected)
+            candidate_rho, candidate_theta, candidate_support, candidate_hits, candidate_type = candidate
+            candidate_slope = calculate_slope(candidate_theta)
+            candidate_slope_sign = get_slope_sign(candidate_slope, candidate_theta)
+            candidate_angle = np.degrees(candidate_theta)
+            
+            # ENHANCED similarity check - these lines are too similar!
+            rho_diff = abs(best_rho - candidate_rho)
+            angle_diff = min(abs(best_angle - candidate_angle), 
+                            abs(best_angle - candidate_angle + 180),
+                            abs(best_angle - candidate_angle - 180))
+            
+            # Much stricter similarity thresholds
+            is_too_similar = (rho_diff < 50 and angle_diff < 10)  # Tightened from 30/5
+            
+            print(f"      Candidate: rho={candidate_rho:.1f}, angle={candidate_angle:.1f}°, slope={candidate_slope:.3f} ({candidate_slope_sign})")
+            print(f"        rho_diff={rho_diff:.1f}px, angle_diff={angle_diff:.1f}°, too_similar={is_too_similar}")
+            
+            # Check if this candidate has opposite slope sign
+            has_opposite_sign = False
+            
+            # Define what constitutes "opposite" slope signs for whiteboard corners
+            if best_slope_sign == 'positive' and candidate_slope_sign == 'negative':
+                has_opposite_sign = True
+            elif best_slope_sign == 'negative' and candidate_slope_sign == 'positive':
+                has_opposite_sign = True
+            elif best_slope_sign == 'horizontal' and candidate_slope_sign in ['positive', 'negative']:
+                has_opposite_sign = True
+            elif best_slope_sign in ['positive', 'negative'] and candidate_slope_sign == 'horizontal':
+                has_opposite_sign = True
+            elif best_slope_sign == 'vertical' and candidate_slope_sign != 'vertical':
+                has_opposite_sign = True
+            elif best_slope_sign != 'vertical' and candidate_slope_sign == 'vertical':
+                has_opposite_sign = True
+            
+            print(f"        opposite_sign={has_opposite_sign} ({best_slope_sign} vs {candidate_slope_sign})")
+            
+            if is_too_similar:
+                print(f"        REJECTED: Too similar (rho_diff={rho_diff:.1f}px, angle_diff={angle_diff:.1f}°)")
+                continue
                 
-                best_left = left_positive[0]
-                best_right = right_negative[0]
-                
-                print(f"    Selected corner pair:")
-                print(f"      Left: rho={best_left[0]:.1f}, slope={best_left[7]:.2f}, support={best_left[2]:.3f}")
-                print(f"      Right: rho={best_right[0]:.1f}, slope={best_right[7]:.2f}, support={best_right[2]:.3f}")
-                
-                # Return exactly 2 lines
-                return [(best_left[0], best_left[1], best_left[2], best_left[3], 'L'),
-                        (best_right[0], best_right[1], best_right[2], best_right[3], 'R')]
+            if not has_opposite_sign:
+                print(f"        REJECTED: Same slope type ({best_slope_sign} vs {candidate_slope_sign})")
+                continue
+            
+            # This candidate has opposite slope sign and is sufficiently different
+            candidate_quality = candidate_support * candidate_hits  # Combined quality metric
+            
+            if candidate_quality > best_opposite_quality:
+                best_opposite = candidate
+                best_opposite_quality = candidate_quality
+                print(f"        NEW BEST OPPOSITE: quality={candidate_quality:.1f}")
+            else:
+                print(f"        REJECTED: Lower quality than current best opposite")
         
-        # If no valid diagonal pairs, return the best 2 lines overall
-        print(f"    No valid corner pairs found, selecting best 2 lines overall")
+        # Add the best opposite line if found
+        if best_opposite:
+            selected_lines.append(best_opposite)
+            opp_rho, opp_theta, opp_support, opp_hits, opp_type = best_opposite
+            opp_slope = calculate_slope(opp_theta)
+            opp_slope_sign = get_slope_sign(opp_slope, opp_theta)
+            opp_angle = np.degrees(opp_theta)
+            print(f"    SELECTED Line 2 (OPPOSITE): rho={opp_rho:.1f}, angle={opp_angle:.1f}°, slope={opp_slope:.3f} ({opp_slope_sign}), support={opp_support:.3f}")
+            print(f"    Final slope comparison: {best_slope:.3f} ({best_slope_sign}) vs {opp_slope:.3f} ({opp_slope_sign})")
+        else:
+            print(f"    NO OPPOSITE LINE FOUND: Only returning the best line")
+            print(f"    All other candidates were either too similar or had the same slope type")
         
-        # Sort all lines by quality and take top 2
-        classified_lines.sort(key=lambda x: (x[2], x[3]), reverse=True)
-        
-        # ABSOLUTE LIMIT: Return at most 2 lines
-        max_lines = min(2, len(classified_lines))
-        selected_lines = classified_lines[:max_lines]
-        
-        print(f"    Selected {len(selected_lines)} best lines:")
-        for i, line in enumerate(selected_lines):
-            print(f"      {i+1}. rho={line[0]:.1f}, angle={np.degrees(line[1]):.1f}°, support={line[2]:.3f}")
-        
-        return [(line[0], line[1], line[2], line[3], line[4]) for line in selected_lines]
+        print(f"    Final result: {len(selected_lines)} line(s)")
+        return selected_lines
     
     def find_best_lines(self, edge_images: List[Tuple[str, np.ndarray]]) -> List[Tuple[float, float]]:
         """
-        Find the best whiteboard edge lines with strict limits and validation
+        Find the best whiteboard edge lines with early deduplication and strict limits
         """
         h, w = edge_images[0][1].shape
         all_scored_lines = []
@@ -461,16 +584,8 @@ class WhiteboardEdgeDetector:
                     print(f"    After scoring: {len(scored_candidates)} candidates")
                     
                     if scored_candidates:
-                        # STRICT LIMIT: Apply geometry validation but limit results
-                        validated_lines = self.validate_whiteboard_geometry(scored_candidates, (h, w))
-                        
-                        # ABSOLUTE LIMIT: Never more than 2 lines total
-                        if len(validated_lines) > 2:
-                            print(f"    WARNING: Geometry validation returned {len(validated_lines)} lines, limiting to 2")
-                            validated_lines = validated_lines[:2]
-                        
-                        method_lines.extend(validated_lines)
-                        print(f"    Method contributed: {len(validated_lines)} lines")
+                        method_lines.extend(scored_candidates)
+                        print(f"    Method contributed: {len(scored_candidates)} lines")
                         
                         if len(method_lines) >= 2:  # Stop if we have enough
                             print(f"    Stopping - already have {len(method_lines)} lines")
@@ -482,6 +597,16 @@ class WhiteboardEdgeDetector:
             if len(all_scored_lines) >= 2:
                 print(f"  Stopping methods - already have {len(all_scored_lines)} lines")
                 break
+        
+        # EARLY DEDUPLICATION - add this before geometry validation
+        if all_scored_lines:
+            print(f"\n  Applying early deduplication...")
+            all_scored_lines = self.deduplicate_lines(all_scored_lines)
+        
+        # Apply geometry validation if we have multiple lines
+        if len(all_scored_lines) > 1:
+            print(f"  Applying sequential selection...")
+            all_scored_lines = self.validate_whiteboard_geometry(all_scored_lines, (h, w))
         
         # FINAL SAFETY CHECK
         if len(all_scored_lines) > 2:
@@ -601,8 +726,13 @@ class WhiteboardEdgeDetector:
             result_img = image.copy()
             colors_bgr = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (255, 255, 0)]
             
+            print(f"  DEBUG: Visualizing {len(lines)} lines")
+            
             for i, (rho, theta) in enumerate(lines):
                 color = colors_bgr[i % len(colors_bgr)]
+                angle_deg = np.degrees(theta)
+                
+                print(f"    Drawing line {i+1}: rho={rho:.1f}, theta={angle_deg:.1f}°, color={color}")
                 
                 # Improved line drawing - find actual intersections with image boundaries
                 h_img, w_img = image.shape[:2]
@@ -611,44 +741,51 @@ class WhiteboardEdgeDetector:
                 a = np.cos(theta)
                 b = np.sin(theta)
                 
+                print(f"      Line equation: a={a:.3f}, b={b:.3f}")
+                
                 # Check intersection with all four image edges
                 # Left edge (x = 0)
                 if abs(a) > 0.001:
                     y_left = rho / b if abs(b) > 0.001 else float('inf')
                     if 0 <= y_left <= h_img:
                         intersections.append((0, int(y_left)))
+                        print(f"      Left edge intersection: (0, {int(y_left)})")
                 
                 # Right edge (x = w_img)
                 if abs(a) > 0.001:
                     y_right = (rho - w_img * a) / b if abs(b) > 0.001 else float('inf')
                     if 0 <= y_right <= h_img:
                         intersections.append((w_img, int(y_right)))
+                        print(f"      Right edge intersection: ({w_img}, {int(y_right)})")
                 
                 # Top edge (y = 0)
                 if abs(b) > 0.001:
                     x_top = rho / a if abs(a) > 0.001 else float('inf')
                     if 0 <= x_top <= w_img:
                         intersections.append((int(x_top), 0))
+                        print(f"      Top edge intersection: ({int(x_top)}, 0)")
                 
                 # Bottom edge (y = h_img)
                 if abs(b) > 0.001:
                     x_bottom = (rho - h_img * b) / a if abs(a) > 0.001 else float('inf')
                     if 0 <= x_bottom <= w_img:
                         intersections.append((int(x_bottom), h_img))
+                        print(f"      Bottom edge intersection: ({int(x_bottom)}, {h_img})")
                 
                 # Remove duplicates
                 unique_intersections = list(set(intersections))
+                print(f"      Total intersections found: {len(unique_intersections)}")
                 
                 if len(unique_intersections) >= 2:
                     p1, p2 = unique_intersections[0], unique_intersections[1]
+                    print(f"      Drawing line from {p1} to {p2}")
                     cv2.line(result_img, p1, p2, color, 4)
                     
                     # Add line label
                     mid_x = (p1[0] + p2[0]) // 2
                     mid_y = (p1[1] + p2[1]) // 2
                     
-                    angle = np.degrees(theta)
-                    edge_type = "H" if abs(angle) < 45 or abs(angle) > 135 else "V"
+                    edge_type = "H" if abs(angle_deg) < 45 or abs(angle_deg) > 135 else "V"
                     
                     if edge_images:
                         support_ratio, edge_hits = self.score_line_against_edges(rho, theta, edge_images[0][1])
@@ -658,6 +795,14 @@ class WhiteboardEdgeDetector:
                     
                     cv2.putText(result_img, label, (mid_x, mid_y - 10), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                    print(f"      SUCCESS: Line {i+1} drawn with label '{label}'")
+                elif len(unique_intersections) == 1:
+                    print(f"      ERROR: Only one intersection found: {unique_intersections[0]}")
+                    print(f"      Line equation may be degenerate or outside image bounds")
+                else:
+                    print(f"      ERROR: No valid intersections found for line {i+1}")
+                    print(f"      rho={rho:.1f}, theta={angle_deg:.1f}°")
+                    print(f"      This line will not be visible in the result")
             
             axes[1, 1].imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
             axes[1, 1].set_title(f'Result ({len(lines)} lines)')
