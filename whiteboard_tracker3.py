@@ -632,9 +632,62 @@ class WhiteboardEdgeDetector:
         print(f"\n  FINAL RESULT: {len(final_lines)} lines (MAX ALLOWED: 2)")
         return final_lines
     
+    def detect_outlier_image(self, image: np.ndarray, surface_mask: np.ndarray) -> Tuple[bool, str]:
+        """
+        Detect if an image is an outlier that should be skipped - VERY LENIENT, only catch extreme outliers
+        Returns: (is_outlier, reason)
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        
+        # Calculate surface area percentage
+        surface_area = np.sum(surface_mask > 0)
+        surface_percentage = surface_area / (h * w)
+        
+        print(f"    Surface analysis: {surface_percentage:.1%} of image")
+        
+        # Check 1: Only reject VERY extreme surface area cases
+        if surface_percentage < 0.01:  # Less than 1% - virtually no surface
+            return True, f"Almost no surface detected ({surface_percentage:.1%} of image)"
+        elif surface_percentage > 0.98:  # More than 98% - entire image is surface
+            return True, f"Entire image is surface ({surface_percentage:.1%})"
+        
+        # Check 2: Only reject if MASSIVELY fragmented
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(surface_mask, connectivity=8)
+        print(f"    Surface fragmentation: {num_labels-1} separate regions")
+        
+        if num_labels > 20:  # Way too many regions
+            return True, f"Surface massively fragmented ({num_labels-1} separate regions)"
+        
+        # Check 3: VERY HIGH BAR for complexity - only catch extreme shelf/furniture scenes
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Only look at the very strongest edges (top 2%)
+        strong_horizontal = np.sum(np.abs(sobel_x) > np.percentile(np.abs(sobel_x), 98))
+        strong_vertical = np.sum(np.abs(sobel_y) > np.percentile(np.abs(sobel_y), 98))
+        total_pixels = h * w
+        
+        horizontal_density = strong_horizontal / total_pixels
+        vertical_density = strong_vertical / total_pixels
+        
+        print(f"    Scene complexity: h_density={horizontal_density:.4f}, v_density={vertical_density:.4f}")
+        
+        # ONLY reject if BOTH directions have VERY high complexity (shelf/furniture scenes)
+        if horizontal_density > 0.10 and vertical_density > 0.10:  # 10% in BOTH directions - extremely high
+            return True, f"Extreme complexity in both directions - likely furniture/shelves (h:{horizontal_density:.3f}, v:{vertical_density:.3f})"
+        
+        # Always pass otherwise
+        return False, "Image appears suitable for whiteboard detection"
+        
+        if is_complex_scene:
+            return True, f"Complex scene detected - {complexity_reason}"
+        
+        return False, "Image appears suitable for whiteboard detection"
+    
     def detect_whiteboard_edges(self, image_path: str) -> Optional[List[Tuple[float, float]]]:
         """
-        Main detection function focused on clean edge detection
+        Main detection function with outlier detection
         """
         # Load image
         image = cv2.imread(image_path)
@@ -654,6 +707,16 @@ class WhiteboardEdgeDetector:
             if surface_area < 500:
                 print(f"  FAIL: Surface area too small ({surface_area} pixels)")
                 return None
+            
+            # Step 1.5: Outlier detection
+            print("\nStep 1.5: Checking for outlier image...")
+            is_outlier, reason = self.detect_outlier_image(image, surface_mask)
+            if is_outlier:
+                print(f"  SKIPPED: Outlier detected - {reason}")
+                print("  This image doesn't appear suitable for whiteboard edge detection")
+                return None
+            else:
+                print(f"  PASS: {reason}")
             
             # Step 2: Create boundary region for edge detection
             print("\nStep 2: Creating boundary region...")
