@@ -4,6 +4,8 @@ import os
 import glob
 from typing import List, Tuple, Optional
 import time
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Try to import Numba for JIT compilation (optional for Pi)
 try:
@@ -17,14 +19,25 @@ except ImportError:
     def jit(func):
         return func
 
-class WhiteboardDetector:
-    def __init__(self, debug: bool = False):
+class OptimizedWhiteboardDetector:
+    def __init__(self, debug: bool = False, enable_threading: bool = True):
         self.debug = debug
+        self.enable_threading = enable_threading
         # Pre-calculate reusable kernels - KEPT ORIGINAL SIZES for accuracy
         self.kernel_7x7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         self.kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         self.kernel_3x3 = np.ones((3, 3), np.uint8)
         self.kernel_25x25 = np.ones((25, 25), np.uint8)  # KEPT ORIGINAL SIZE
+        
+        # Pre-calculate commonly used values (kept from earlier optimizations)
+        self._cos_cache = {}
+        self._sin_cache = {}
+        
+        # Thread pool for parallel processing (reused across frames)
+        if self.enable_threading:
+            self._thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="whiteboard")
+        else:
+            self._thread_pool = None
         
         # Optimize OpenCV for Pi
         cv2.setUseOptimized(True)
@@ -223,38 +236,85 @@ class WhiteboardDetector:
         return final_edges
     
     def detect_clean_edges(self, image: np.ndarray, boundary_region: np.ndarray) -> List[Tuple[str, np.ndarray]]:
-        """Detect edges with enhanced filtering - ORIGINAL METHODS PRESERVED"""
+        """Detect edges with enhanced filtering - ORIGINAL METHODS PRESERVED + PARALLEL PROCESSING"""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
         # Pre-compute blurred versions once
         blur5 = cv2.GaussianBlur(gray, (5, 5), 1)
         bilateral = cv2.bilateralFilter(gray, 11, 100, 100)
         
-        edge_results = []
+        if self.enable_threading and self._thread_pool:
+            # PARALLEL PROCESSING: Run edge detection methods in parallel
+            def process_canny_standard():
+                edges = cv2.Canny(blur5, 50, 150, apertureSize=3)
+                filtered = self.filter_structural_edges(edges, boundary_region)
+                return ('Canny_50_150_filtered', filtered)
+            
+            def process_canny_low():
+                edges = cv2.Canny(blur5, 30, 100, apertureSize=3)
+                filtered = self.filter_structural_edges(edges, boundary_region)
+                return ('Canny_30_100_filtered', filtered)
+            
+            def process_bilateral():
+                edges = cv2.Canny(bilateral, 40, 120, apertureSize=3)
+                filtered = self.filter_structural_edges(edges, boundary_region)
+                return ('Bilateral_Canny_filtered', filtered)
+            
+            def process_sobel():
+                sobel_x = cv2.Sobel(blur5, cv2.CV_64F, 1, 0, ksize=3)
+                sobel_y = cv2.Sobel(blur5, cv2.CV_64F, 0, 1, ksize=3)
+                sobel_mag = np.hypot(sobel_x, sobel_y)
+                sobel_thresh = np.percentile(sobel_mag, 94)
+                sobel_edges = ((sobel_mag > sobel_thresh) * 255).astype(np.uint8)
+                filtered = self.filter_structural_edges(sobel_edges, boundary_region)
+                return ('Sobel_filtered', filtered)
+            
+            # Submit all edge detection tasks in parallel
+            futures = [
+                self._thread_pool.submit(process_canny_standard),
+                self._thread_pool.submit(process_canny_low),
+                self._thread_pool.submit(process_bilateral),
+                self._thread_pool.submit(process_sobel)
+            ]
+            
+            # Collect results as they complete
+            edge_results = []
+            for future in futures:
+                try:
+                    result = future.result(timeout=2.0)  # 2 second timeout per method
+                    edge_results.append(result)
+                except Exception as e:
+                    if self.debug:
+                        print(f"    Edge detection thread failed: {e}")
+                    continue
         
-        # Method 1: Standard Canny with moderate blur
-        edges1 = cv2.Canny(blur5, 50, 150, apertureSize=3)
-        filtered1 = self.filter_structural_edges(edges1, boundary_region)
-        edge_results.append(('Canny_50_150_filtered', filtered1))
-        
-        # Method 2: Lower threshold Canny
-        edges2 = cv2.Canny(blur5, 30, 100, apertureSize=3)
-        filtered2 = self.filter_structural_edges(edges2, boundary_region)
-        edge_results.append(('Canny_30_100_filtered', filtered2))
-        
-        # Method 3: Bilateral filter + Canny
-        edges3 = cv2.Canny(bilateral, 40, 120, apertureSize=3)
-        filtered3 = self.filter_structural_edges(edges3, boundary_region)
-        edge_results.append(('Bilateral_Canny_filtered', filtered3))
-        
-        # Method 4: Sobel with high threshold
-        sobel_x = cv2.Sobel(blur5, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(blur5, cv2.CV_64F, 0, 1, ksize=3)
-        sobel_mag = np.hypot(sobel_x, sobel_y)  # Faster than sqrt
-        sobel_thresh = np.percentile(sobel_mag, 94)
-        sobel_edges = ((sobel_mag > sobel_thresh) * 255).astype(np.uint8)
-        filtered4 = self.filter_structural_edges(sobel_edges, boundary_region)
-        edge_results.append(('Sobel_filtered', filtered4))
+        else:
+            # SEQUENTIAL PROCESSING: Original method
+            edge_results = []
+            
+            # Method 1: Standard Canny with moderate blur
+            edges1 = cv2.Canny(blur5, 50, 150, apertureSize=3)
+            filtered1 = self.filter_structural_edges(edges1, boundary_region)
+            edge_results.append(('Canny_50_150_filtered', filtered1))
+            
+            # Method 2: Lower threshold Canny
+            edges2 = cv2.Canny(blur5, 30, 100, apertureSize=3)
+            filtered2 = self.filter_structural_edges(edges2, boundary_region)
+            edge_results.append(('Canny_30_100_filtered', filtered2))
+            
+            # Method 3: Bilateral filter + Canny
+            edges3 = cv2.Canny(bilateral, 40, 120, apertureSize=3)
+            filtered3 = self.filter_structural_edges(edges3, boundary_region)
+            edge_results.append(('Bilateral_Canny_filtered', filtered3))
+            
+            # Method 4: Sobel with high threshold
+            sobel_x = cv2.Sobel(blur5, cv2.CV_64F, 1, 0, ksize=3)
+            sobel_y = cv2.Sobel(blur5, cv2.CV_64F, 0, 1, ksize=3)
+            sobel_mag = np.hypot(sobel_x, sobel_y)  # Faster than sqrt
+            sobel_thresh = np.percentile(sobel_mag, 94)
+            sobel_edges = ((sobel_mag > sobel_thresh) * 255).astype(np.uint8)
+            filtered4 = self.filter_structural_edges(sobel_edges, boundary_region)
+            edge_results.append(('Sobel_filtered', filtered4))
         
         # Report edge pixel counts
         if self.debug:
@@ -263,6 +323,42 @@ class WhiteboardDetector:
         
         return edge_results
     
+    def score_multiple_lines_parallel(self, lines_data: List[Tuple], edges: np.ndarray) -> List[Tuple]:
+        """Score multiple lines in parallel for better performance"""
+        if not self.enable_threading or not self._thread_pool or len(lines_data) < 4:
+            # Fall back to sequential processing for small line counts
+            results = []
+            for rho, theta, angle_deg, is_horizontal, is_vertical, is_diagonal in lines_data:
+                support_ratio, edge_hits = self.score_line_against_edges(rho, theta, edges)
+                results.append((rho, theta, angle_deg, is_horizontal, is_vertical, is_diagonal, support_ratio, edge_hits))
+            return results
+        
+        # PARALLEL LINE SCORING: Split lines into chunks for parallel processing
+        chunk_size = max(2, len(lines_data) // 2)  # Use 2 threads
+        chunks = [lines_data[i:i + chunk_size] for i in range(0, len(lines_data), chunk_size)]
+        
+        def score_chunk(chunk):
+            chunk_results = []
+            for rho, theta, angle_deg, is_horizontal, is_vertical, is_diagonal in chunk:
+                support_ratio, edge_hits = self.score_line_against_edges(rho, theta, edges)
+                chunk_results.append((rho, theta, angle_deg, is_horizontal, is_vertical, is_diagonal, support_ratio, edge_hits))
+            return chunk_results
+        
+        # Submit chunks to thread pool
+        futures = [self._thread_pool.submit(score_chunk, chunk) for chunk in chunks]
+        
+        # Collect results
+        results = []
+        for future in futures:
+            try:
+                chunk_results = future.result(timeout=1.0)
+                results.extend(chunk_results)
+            except Exception as e:
+                if self.debug:
+                    print(f"    Line scoring thread failed: {e}")
+                continue
+        
+        return results
     @staticmethod
     @njit
     def score_line_numba(rho, theta, edges, h, w):
@@ -554,12 +650,12 @@ class WhiteboardDetector:
             if self.debug:
                 print(f"    Edge pixels available: {edge_pixel_count}")
             
-            # Try different Hough parameter sets - SLIGHTLY REDUCED for Pi
+            # Try different Hough parameter sets - ORIGINAL THRESHOLDS
             hough_configs = [
+                {'threshold': 100, 'rho': 1, 'theta': np.pi/180},
                 {'threshold': 80, 'rho': 1, 'theta': np.pi/180},
                 {'threshold': 60, 'rho': 1, 'theta': np.pi/180},
                 {'threshold': 40, 'rho': 1, 'theta': np.pi/180},
-                {'threshold': 30, 'rho': 1, 'theta': np.pi/180},  # Added lower threshold
             ]
             
             method_lines = []
@@ -571,13 +667,14 @@ class WhiteboardDetector:
                     if self.debug:
                         print(f"    HoughLines (thresh={config['threshold']}): {len(lines)} raw lines")
                     
-                    # Limit to top 15 lines (slightly reduced from 20 for Pi)
-                    lines = lines[:15]
+                    # Limit to top 20 lines - ORIGINAL LIMIT
+                    lines = lines[:20]
                     if self.debug:
                         print(f"    Limiting to first {len(lines)} lines")
                     
                     scored_candidates = []
                     
+                    # ORIGINAL LOGIC: Process each line individually
                     for line in lines:
                         rho, theta = line[0]
                         angle_deg = np.degrees(theta)
@@ -657,6 +754,11 @@ class WhiteboardDetector:
         # Return only the line coordinates
         return [(rho, theta) for rho, theta, support, hits, edge_type in all_scored_lines]
     
+    def __del__(self):
+        """Clean up thread pool on destruction"""
+        if hasattr(self, '_thread_pool') and self._thread_pool:
+            self._thread_pool.shutdown(wait=False)
+    
     def detect_whiteboard_edges(self, image: np.ndarray) -> Optional[List[Tuple[float, float]]]:
         """Main detection function - ORIGINAL FLOW PRESERVED, optimized for camera input"""
         if image is None:
@@ -700,7 +802,8 @@ class WhiteboardDetector:
                 print(f"  ERROR during processing: {str(e)}")
             return None
 
-def process_single_image(image_path: str, detector: WhiteboardDetector) -> Optional[List[Tuple[float, float]]]:
+
+def process_single_image(image_path: str, detector: OptimizedWhiteboardDetector) -> Optional[List[Tuple[float, float]]]:
     """Process a single image file - for testing"""
     image = cv2.imread(image_path)
     return detector.detect_whiteboard_edges(image)
@@ -792,7 +895,7 @@ def create_debug_visualization(image, surface_mask, edges, lines, filename):
 
 def main():
     """Debug main function - processes all images and saves visualizations"""
-    detector = WhiteboardDetector(debug=True)
+    detector = OptimizedWhiteboardDetector(debug=True, enable_threading=True)
     
     # Find images
     image_files = []
