@@ -17,7 +17,7 @@ except ImportError:
     def jit(func):
         return func
 
-class OptimizedWhiteboardDetector:
+class WhiteboardDetector:
     def __init__(self, debug: bool = False):
         self.debug = debug
         # Pre-calculate reusable kernels - KEPT ORIGINAL SIZES for accuracy
@@ -700,7 +700,7 @@ class OptimizedWhiteboardDetector:
                 print(f"  ERROR during processing: {str(e)}")
             return None
 
-def process_single_image(image_path: str, detector: OptimizedWhiteboardDetector) -> Optional[List[Tuple[float, float]]]:
+def process_single_image(image_path: str, detector: WhiteboardDetector) -> Optional[List[Tuple[float, float]]]:
     """Process a single image file - for testing"""
     image = cv2.imread(image_path)
     return detector.detect_whiteboard_edges(image)
@@ -792,7 +792,7 @@ def create_debug_visualization(image, surface_mask, edges, lines, filename):
 
 def main():
     """Debug main function - processes all images and saves visualizations"""
-    detector = OptimizedWhiteboardDetector(debug=True)
+    detector = WhiteboardDetector(debug=True)
     
     # Find images
     image_files = []
@@ -845,6 +845,7 @@ def main():
             
             # Fallback to first edge method if Sobel not found
             if sobel_edges is None:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 sobel_edges = edge_images[0][1] if edge_images else np.zeros_like(gray)
             
             # Step 4: Find lines
