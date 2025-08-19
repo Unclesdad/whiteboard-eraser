@@ -657,8 +657,173 @@ class WhiteboardDetector:
         # Return only the line coordinates
         return [(rho, theta) for rho, theta, support, hits, edge_type in all_scored_lines]
     
-    def detect_whiteboard_edges(self, image: np.ndarray) -> Optional[List[Tuple[float, float]]]:
-        """Main detection function - ORIGINAL FLOW PRESERVED, optimized for camera input"""
+    def detect_markings(self, image: np.ndarray, surface_mask: np.ndarray, edge_lines: List[Tuple[float, float]] = None) -> np.ndarray:
+        """
+        Detect dry-erase marker markings on the whiteboard surface.
+        
+        Args:
+            image: Input BGR image
+            surface_mask: Binary mask of the whiteboard surface area
+            edge_lines: Optional list of (rho, theta) tuples representing whiteboard edge lines.
+                       If provided, only markings below these lines will be detected.
+        
+        Returns:
+            Binary mask where white pixels (255) indicate detected markings
+        """
+        # Convert to HSV for better color separation
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Define HSV ranges for different dry-erase marker colors (broader ranges for better detection)
+        color_ranges = {
+            'blue': [(100, 30, 50), (130, 255, 255)],
+            'red_1': [(0, 30, 50), (10, 255, 255)],      # Red wraps around hue
+            'red_2': [(170, 30, 50), (180, 255, 255)],
+            'purple': [(110, 20, 50), (170, 255, 255)],  # Broader purple range with lower saturation
+            'green': [(40, 30, 50), (80, 255, 255)]
+        }
+        
+        # Create mask for whiteboard surface only to limit processing
+        h, w = image.shape[:2]
+        
+        # If edge lines are provided, create a mask for the area below the lines
+        if edge_lines:
+            below_edges_mask = np.ones((h, w), dtype=np.uint8) * 255
+            
+            for rho, theta in edge_lines:
+                # Create mask for area below this edge line
+                line_mask = np.zeros((h, w), dtype=np.uint8)
+                
+                a, b = np.cos(theta), np.sin(theta)
+                
+                # For each column, find the y-coordinate of the line and mask below it
+                for x in range(w):
+                    if abs(b) > 0.001:  # Avoid division by zero
+                        y_line = (rho - x * a) / b
+                        if 0 <= y_line <= h:
+                            # Mark all pixels below this line
+                            line_mask[int(y_line):, x] = 255
+                
+                # Intersect with previous line masks (area below ALL detected edges)
+                below_edges_mask = cv2.bitwise_and(below_edges_mask, line_mask)
+            
+            # Combine with surface mask to get whiteboard area below edges
+            final_mask = cv2.bitwise_and(surface_mask, below_edges_mask)
+            
+            if self.debug:
+                below_edge_pixels = np.count_nonzero(below_edges_mask)
+                final_mask_pixels = np.count_nonzero(final_mask)
+                print(f"  Below edges mask: {below_edge_pixels} pixels")
+                print(f"  Final marking region: {final_mask_pixels} pixels")
+        else:
+            # Fall back to just surface mask if no edge lines provided
+            final_mask = surface_mask
+        
+        whiteboard_region = cv2.bitwise_and(hsv, hsv, mask=final_mask)
+        
+        all_markings = np.zeros((h, w), dtype=np.uint8)
+        
+        if self.debug:
+            print(f"  Detecting markings in whiteboard region...")
+        
+        # Detect each color range
+        for color_name, (lower, upper) in color_ranges.items():
+            lower_bound = np.array(lower, dtype=np.uint8)
+            upper_bound = np.array(upper, dtype=np.uint8)
+            
+            color_mask = cv2.inRange(whiteboard_region, lower_bound, upper_bound)
+            
+            # Clean up the mask with morphological operations
+            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, self.kernel_3x3)
+            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, self.kernel_5x5)
+            
+            # Filter out small noise using connected components
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
+            
+            if num_labels > 1:
+                for i in range(1, num_labels):
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    # Keep components with reasonable area (filter out noise)
+                    if area >= 20:  # Minimum area for marking pixels
+                        component_mask = (labels == i).astype(np.uint8) * 255
+                        all_markings = cv2.bitwise_or(all_markings, component_mask)
+                        
+                        if self.debug:
+                            print(f"    {color_name}: found component with {area} pixels")
+        
+        # Final cleanup of combined markings
+        all_markings = cv2.morphologyEx(all_markings, cv2.MORPH_CLOSE, self.kernel_3x3)
+        
+        marking_pixels = np.count_nonzero(all_markings)
+        if self.debug:
+            print(f"  Total marking pixels detected: {marking_pixels}")
+        
+        return all_markings
+
+    def extract_marking_regions(self, marking_mask: np.ndarray) -> List[Tuple[int, int]]:
+        """
+        Convert pixel-level marking detection into discrete 8x8 pixel marking regions.
+        
+        Args:
+            marking_mask: Binary mask where white pixels indicate detected markings
+            
+        Returns:
+            List of (x, y) tuples representing the center coordinates of 8x8 marking regions
+        """
+        if np.count_nonzero(marking_mask) == 0:
+            return []
+        
+        # Find all marking pixel coordinates
+        marking_coords = np.column_stack(np.where(marking_mask > 0))  # (y, x) coordinates
+        
+        if len(marking_coords) == 0:
+            return []
+        
+        # Convert to (x, y) format
+        marking_points = [(coord[1], coord[0]) for coord in marking_coords]
+        
+        marking_regions = []
+        used_points = set()
+        
+        if self.debug:
+            print(f"  Processing {len(marking_points)} marking pixels into regions...")
+        
+        for x, y in marking_points:
+            if (x, y) in used_points:
+                continue
+                
+            # This point becomes the center of a new marking region
+            center_x, center_y = x, y
+            marking_regions.append((center_x, center_y))
+            
+            # Mark all points within 8x8 box centered at this point as used
+            box_half_size = 4  # 8x8 box has radius of 4 pixels
+            
+            for px, py in marking_points:
+                if (px, py) not in used_points:
+                    # Check if this point is within the 8x8 box
+                    if (abs(px - center_x) <= box_half_size and 
+                        abs(py - center_y) <= box_half_size):
+                        used_points.add((px, py))
+        
+        if self.debug:
+            print(f"  Created {len(marking_regions)} marking regions from {len(marking_points)} pixels")
+        
+        return marking_regions
+
+    def detect_whiteboard_edges(self, image: np.ndarray) -> Optional[Tuple[List[Tuple[float, float]], np.ndarray, List[Tuple[int, int]]]]:
+        """
+        Main detection function that finds whiteboard edges and markings.
+        
+        Args:
+            image: Input BGR image from camera positioned above the whiteboard
+            
+        Returns:
+            Tuple of (edges, markings, marking_regions) where:
+            - edges: List of (rho, theta) tuples representing detected whiteboard edge lines
+            - markings: Binary mask where white pixels indicate detected dry-erase markings
+            - marking_regions: List of (x, y) tuples representing centers of 8x8 marking regions
+            Returns None if no whiteboard edges are detected.
+        """
         if image is None:
             return None
         
@@ -681,6 +846,12 @@ class WhiteboardDetector:
             # Step 4: Find lines
             detected_lines = self.find_best_lines(edge_images)
             
+            # Step 5: Detect markings using the same surface mask and edge lines for geometric constraint
+            detected_markings = self.detect_markings(image, surface_mask, detected_lines)
+            
+            # Step 6: Extract marking regions from pixel-level detections
+            marking_regions = self.extract_marking_regions(detected_markings)
+            
             if not detected_lines:
                 if self.debug:
                     print("  No lines detected")
@@ -692,21 +863,25 @@ class WhiteboardDetector:
                     angle = np.degrees(theta)
                     edge_type = "horizontal" if abs(angle) < 45 or abs(angle) > 135 else "vertical"
                     print(f"  Edge {i+1}: {edge_type}, rho={rho:.1f}, angle={angle:.1f}°")
+                
+                marking_pixels = np.count_nonzero(detected_markings)
+                print(f"  Markings: {marking_pixels} pixels detected")
+                print(f"  Marking regions: {len(marking_regions)} discrete areas")
             
-            return detected_lines
+            return detected_lines, detected_markings, marking_regions
             
         except Exception as e:
             if self.debug:
                 print(f"  ERROR during processing: {str(e)}")
             return None
 
-def process_single_image(image_path: str, detector: WhiteboardDetector) -> Optional[List[Tuple[float, float]]]:
+def process_single_image(image_path: str, detector: WhiteboardDetector) -> Optional[Tuple[List[Tuple[float, float]], np.ndarray, List[Tuple[int, int]]]]:
     """Process a single image file - for testing"""
     image = cv2.imread(image_path)
     return detector.detect_whiteboard_edges(image)
 
-def create_debug_visualization(image, surface_mask, edges, lines, filename):
-    """Create 4-panel debug visualization matching the original format"""
+def create_debug_visualization(image, surface_mask, edges, lines, filename, markings=None):
+    """Create 4-panel debug visualization with optional markings overlay"""
     try:
         import matplotlib.pyplot as plt
         import matplotlib
@@ -729,8 +904,15 @@ def create_debug_visualization(image, surface_mask, edges, lines, filename):
         axes[1, 0].set_title('Edges: Sobel_filtered')
         axes[1, 0].axis('off')
         
-        # Bottom right: Result with detected lines
+        # Bottom right: Result with detected lines and markings
         result_img = image.copy()
+        
+        # Overlay markings if provided
+        if markings is not None:
+            # Create colored overlay for markings (cyan for visibility)
+            marking_overlay = np.zeros_like(image)
+            marking_overlay[markings > 0] = [255, 255, 0]  # Cyan color
+            result_img = cv2.addWeighted(result_img, 0.8, marking_overlay, 0.2, 0)
         
         if lines:
             h, w = image.shape[:2]
