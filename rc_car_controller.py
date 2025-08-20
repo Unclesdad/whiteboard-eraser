@@ -51,9 +51,17 @@ class RCCarConfig:
     camera_fps: int = 10
     pixel_to_mm_ratio: float = 0.5  # Approximate conversion factor (to be calibrated)
     
+    # Camera field of view (for localization)
+    camera_fov_horizontal: float = 62.0  # degrees (typical for Pi Camera Module 3)
+    camera_fov_vertical: float = 48.0    # degrees
+    
     # Outlier detection
     max_position_jump: float = 200.0  # Maximum realistic position change between frames (mm)
     position_history_size: int = 10  # Number of positions to track for outlier detection
+    
+    # Gyro integration
+    gyro_trust_threshold: float = 0.95   # When to trust gyro over vision for heading
+    edge_classification_tolerance: float = 15.0  # degrees tolerance for edge angle classification
 
 class CarState(Enum):
     """States for the car's behavior"""
@@ -169,6 +177,9 @@ class RCCarController:
         
         # Initialize pose history
         self.pose_history.append(self.pose.copy())
+        
+        # Debug flag for localization
+        self.debug_localization = False  # Set to True for detailed localization debugging
         
         print(f"RC Car Controller initialized at position ({start_x:.1f}, {start_y:.1f})")
         print(f"Camera: {car_config.camera_width}x{car_config.camera_height} @ {car_config.camera_fps}fps")
@@ -382,27 +393,87 @@ class RCCarController:
         
         return distance > max(self.car_config.max_position_jump, max_movement)
     
-    def update_pose_from_vision(self, detected_edges: List[Tuple[float, float]], confidence: float = 0.5):
-        """Update pose estimate using vision data with outlier detection"""
-        if not detected_edges or confidence < 0.3:
+    def update_pose_from_vision(self, detected_edges: List[Tuple[float, float]], base_confidence: float = 0.5):
+        """Update pose estimate using gyro-assisted edge localization"""
+        if not detected_edges:
             self.vision_outlier_count += 1
             return
         
-        # For now, use simple approach - maintain current position if edges detected
-        # In full implementation, would triangulate position from detected edges
         current_time = time.time()
         
-        # Simple validation - if we detect edges, assume vision is working
-        if not self.detect_position_outlier(self.pose.x, self.pose.y):
-            self.pose.confidence = min(confidence + 0.2, 1.0)
-            self.pose.timestamp = current_time
-            self.last_vision_update = current_time
-            self.last_consistent_vision = current_time
-            self.vision_available = True
-            self.vision_outlier_count = 0
-        else:
+        try:
+            # Get current gyro heading
+            gyro_heading = self.read_gyro_heading()
+            
+            # Step 1: Classify edges using gyro context
+            image_shape = (self.car_config.camera_height, self.car_config.camera_width)
+            classified_edges = self.classify_detected_edges(detected_edges, gyro_heading, image_shape)
+            
+            if not classified_edges:
+                self.vision_outlier_count += 1
+                return
+            
+            # Step 2: Calculate distances to classified edges
+            edge_distances = self.calculate_distance_to_edges(classified_edges, gyro_heading)
+            
+            if not edge_distances:
+                self.vision_outlier_count += 1
+                return
+            
+            # Step 3: Triangulate absolute position
+            estimated_x, estimated_y, triangulation_confidence = self.triangulate_position_from_edges(edge_distances, gyro_heading)
+            
+            if estimated_x is None or estimated_y is None or triangulation_confidence < 0.1:
+                self.vision_outlier_count += 1
+                return
+            
+            # Step 4: Validate against odometry prediction (outlier detection)
+            if self.detect_position_outlier(estimated_x, estimated_y):
+                self.vision_outlier_count += 1
+                if self.debug_localization:
+                    print(f"  Position outlier rejected: ({estimated_x:.1f}, {estimated_y:.1f})")
+                return
+            
+            # Step 5: Update pose with blended result
+            # Blend new position with current pose based on confidence
+            final_confidence = min(base_confidence * triangulation_confidence, 0.95)
+            
+            if final_confidence > 0.3:
+                # High confidence - update position
+                blend_factor = final_confidence
+                
+                new_x = self.pose.x * (1 - blend_factor) + estimated_x * blend_factor
+                new_y = self.pose.y * (1 - blend_factor) + estimated_y * blend_factor
+                
+                # Update pose
+                self.pose.x = new_x
+                self.pose.y = new_y
+                
+                # Update heading from gyro if confidence is high enough
+                if final_confidence > self.car_config.gyro_trust_threshold:
+                    self.pose.theta = gyro_heading
+                
+                self.pose.confidence = final_confidence
+                self.pose.timestamp = current_time
+                
+                # Update tracking variables
+                self.last_vision_update = current_time
+                self.last_consistent_vision = current_time
+                self.vision_available = True
+                self.vision_outlier_count = 0
+                
+                # Add to pose history
+                self.pose_history.append(self.pose.copy())
+                
+                if self.debug_localization:
+                    print(f"  Vision pose updated: ({new_x:.1f}, {new_y:.1f}) confidence={final_confidence:.2f}")
+            else:
+                # Low confidence - just reset outlier count but don't update position
+                self.vision_outlier_count = max(0, self.vision_outlier_count - 1)
+                
+        except Exception as e:
+            print(f"Vision localization error: {e}")
             self.vision_outlier_count += 1
-            print(f"Vision outlier detected, count: {self.vision_outlier_count}")
     
     def process_vision_frame(self) -> bool:
         """Process a single vision frame for edge detection and markings"""
@@ -441,6 +512,255 @@ class RCCarController:
             print(f"Vision processing error: {e}")
             self.vision_outlier_count += 1
             return False
+    
+    def classify_detected_edges(self, edges: List[Tuple[float, float]], gyro_heading: float, image_shape: Tuple[int, int]) -> dict:
+        """Classify detected edges as top/bottom/left/right using gyro heading and line parameters"""
+        if not edges:
+            return {}
+        
+        h, w = image_shape
+        center_x, center_y = w / 2, h / 2
+        classified_edges = {}
+        
+        for rho, theta in edges:
+            # Convert line angle to absolute world angle using gyro
+            world_angle = math.degrees(theta + gyro_heading)
+            # Normalize to [0, 360)
+            world_angle = world_angle % 360
+            
+            # Classify based on world angle (accounting for tolerance)
+            tolerance = self.car_config.edge_classification_tolerance
+            
+            # Determine if line is horizontal or vertical in world coordinates
+            is_horizontal = (abs(world_angle) < tolerance or 
+                           abs(world_angle - 180) < tolerance or
+                           abs(world_angle - 360) < tolerance)
+            
+            is_vertical = (abs(world_angle - 90) < tolerance or 
+                         abs(world_angle - 270) < tolerance)
+            
+            if is_horizontal:
+                # Horizontal line - could be top or bottom edge
+                # Use rho and line position to determine which
+                # Calculate where line intersects vertical center of image
+                if abs(math.sin(theta)) > 0.001:  # Avoid division by zero
+                    y_at_center = rho / math.sin(theta)
+                    if y_at_center < center_y:
+                        # Line is in upper part of image
+                        edge_type = 'top'
+                    else:
+                        # Line is in lower part of image  
+                        edge_type = 'bottom'
+                else:
+                    # Nearly horizontal line, use rho sign
+                    edge_type = 'bottom' if rho > 0 else 'top'
+                    
+            elif is_vertical:
+                # Vertical line - could be left or right edge
+                # Calculate where line intersects horizontal center of image
+                if abs(math.cos(theta)) > 0.001:  # Avoid division by zero
+                    x_at_center = rho / math.cos(theta)
+                    if x_at_center < center_x:
+                        # Line is in left part of image
+                        edge_type = 'left'
+                    else:
+                        # Line is in right part of image
+                        edge_type = 'right'
+                else:
+                    # Nearly vertical line, use rho sign
+                    edge_type = 'right' if rho > 0 else 'left'
+            else:
+                # Diagonal line - might be a corner or noise, skip for now
+                continue
+            
+            # Store the best edge of each type (prefer stronger/clearer lines)
+            if edge_type not in classified_edges:
+                classified_edges[edge_type] = (rho, theta, world_angle)
+            else:
+                # Keep the edge with smaller absolute rho (closer to image center, usually clearer)
+                current_rho = classified_edges[edge_type][0]
+                if abs(rho) < abs(current_rho):
+                    classified_edges[edge_type] = (rho, theta, world_angle)
+        
+        if self.debug_localization:
+            print(f"  Edge classification (gyro={math.degrees(gyro_heading):.1f}°):")
+            for edge_type, (rho, theta, world_angle) in classified_edges.items():
+                print(f"    {edge_type}: rho={rho:.1f}px, theta={math.degrees(theta):.1f}°, world_angle={world_angle:.1f}°")
+        
+        return classified_edges
+    
+    def calculate_distance_to_edges(self, classified_edges: dict, gyro_heading: float) -> dict:
+        """Calculate real-world distance to each classified whiteboard edge"""
+        edge_distances = {}
+        
+        # Camera parameters
+        camera_height = self.car_config.camera_height  # 135mm (13.5cm)
+        h_fov_rad = math.radians(self.car_config.camera_fov_horizontal)
+        v_fov_rad = math.radians(self.car_config.camera_fov_vertical)
+        
+        image_width = self.car_config.camera_width
+        image_height = self.car_config.camera_height
+        
+        # Focal length equivalents in pixels
+        focal_length_x = (image_width / 2) / math.tan(h_fov_rad / 2)
+        focal_length_y = (image_height / 2) / math.tan(v_fov_rad / 2)
+        
+        for edge_type, (rho, theta, world_angle) in classified_edges.items():
+            distance_mm = 0.0
+            
+            if edge_type in ['top', 'bottom']:
+                # Horizontal edge - calculate distance using vertical perspective
+                # Find where line intersects image center vertically
+                if abs(math.sin(theta)) > 0.001:
+                    y_intersect = rho / math.sin(theta)  # y-coordinate in pixels
+                    
+                    # Convert to distance from image center
+                    y_from_center = y_intersect - (image_height / 2)
+                    
+                    # Convert pixel offset to angle
+                    angle_from_horizontal = math.atan(y_from_center / focal_length_y)
+                    
+                    # Calculate horizontal distance on whiteboard
+                    # Using trigonometry: distance = height / tan(angle)
+                    if abs(angle_from_horizontal) > 0.001:
+                        distance_mm = camera_height / math.tan(abs(angle_from_horizontal))
+                    else:
+                        # Edge is approximately at horizon level
+                        distance_mm = 1000.0  # Large distance estimate
+                    
+                    # Sanity check - distance should be reasonable
+                    distance_mm = min(distance_mm, 2000.0)  # Cap at 2 meters
+                    
+            elif edge_type in ['left', 'right']:
+                # Vertical edge - calculate distance using horizontal perspective  
+                # Find where line intersects image center horizontally
+                if abs(math.cos(theta)) > 0.001:
+                    x_intersect = rho / math.cos(theta)  # x-coordinate in pixels
+                    
+                    # Convert to distance from image center
+                    x_from_center = x_intersect - (image_width / 2)
+                    
+                    # Convert pixel offset to angle
+                    angle_from_center = math.atan(x_from_center / focal_length_x)
+                    
+                    # Calculate distance using horizontal geometry
+                    # This is more complex as we need to consider the camera height and viewing angle
+                    # For simplicity, use similar approach as vertical but with horizontal FOV
+                    if abs(angle_from_center) > 0.001:
+                        # Approximate distance based on horizontal perspective
+                        distance_mm = camera_height / math.tan(abs(angle_from_center))
+                    else:
+                        distance_mm = 1000.0
+                    
+                    # Apply scaling factor for horizontal distance calculation
+                    # (this may need calibration based on actual camera setup)
+                    distance_mm *= 0.8  # Empirical scaling factor
+                    
+                    # Sanity check
+                    distance_mm = min(distance_mm, 2000.0)
+            
+            edge_distances[edge_type] = max(distance_mm, 50.0)  # Minimum distance of 5cm
+        
+        if self.debug_localization and edge_distances:
+            print(f"  Edge distances:")
+            for edge_type, distance in edge_distances.items():
+                print(f"    {edge_type}: {distance:.1f}mm")
+        
+        return edge_distances
+    
+    def triangulate_position_from_edges(self, edge_distances: dict, gyro_heading: float) -> Tuple[float, float, float]:
+        """Calculate absolute position from distances to whiteboard edges using triangulation"""
+        if not edge_distances:
+            return None, None, 0.0
+        
+        estimated_x = None
+        estimated_y = None
+        confidence = 0.0
+        
+        # Available edges for triangulation
+        has_top = 'top' in edge_distances
+        has_bottom = 'bottom' in edge_distances
+        has_left = 'left' in edge_distances
+        has_right = 'right' in edge_distances
+        
+        # Calculate X position from left/right edges
+        if has_left and has_right:
+            # Both left and right visible - high confidence X position
+            left_dist = edge_distances['left']
+            right_dist = edge_distances['right']
+            total_width = left_dist + right_dist
+            
+            # Validate against known whiteboard width
+            if abs(total_width - self.whiteboard_width_mm) < 300:  # Allow 30cm tolerance
+                estimated_x = left_dist
+                confidence += 0.4
+            else:
+                # Distances don't match whiteboard width - use individual edges with lower confidence
+                if left_dist < right_dist:
+                    estimated_x = left_dist
+                else:
+                    estimated_x = self.whiteboard_width_mm - right_dist
+                confidence += 0.2
+        elif has_left:
+            # Only left edge visible
+            estimated_x = edge_distances['left']
+            confidence += 0.15
+        elif has_right:
+            # Only right edge visible
+            estimated_x = self.whiteboard_width_mm - edge_distances['right']
+            confidence += 0.15
+        
+        # Calculate Y position from top/bottom edges
+        if has_top and has_bottom:
+            # Both top and bottom visible - high confidence Y position
+            top_dist = edge_distances['top']
+            bottom_dist = edge_distances['bottom']
+            total_height = top_dist + bottom_dist
+            
+            # Validate against known whiteboard height
+            if abs(total_height - self.whiteboard_height_mm) < 200:  # Allow 20cm tolerance
+                estimated_y = top_dist
+                confidence += 0.4
+            else:
+                # Use individual edges with lower confidence
+                if top_dist < bottom_dist:
+                    estimated_y = top_dist
+                else:
+                    estimated_y = self.whiteboard_height_mm - bottom_dist
+                confidence += 0.2
+        elif has_top:
+            # Only top edge visible
+            estimated_y = edge_distances['top']
+            confidence += 0.15
+        elif has_bottom:
+            # Only bottom edge visible
+            estimated_y = self.whiteboard_height_mm - edge_distances['bottom']
+            confidence += 0.15
+        
+        # Apply boundary constraints
+        if estimated_x is not None:
+            estimated_x = max(0, min(estimated_x, self.whiteboard_width_mm))
+        
+        if estimated_y is not None:
+            estimated_y = max(0, min(estimated_y, self.whiteboard_height_mm))
+        
+        # Bonus confidence for having multiple edges
+        edge_count = len(edge_distances)
+        if edge_count >= 3:
+            confidence += 0.2
+        elif edge_count >= 2:
+            confidence += 0.1
+        
+        # Cap confidence at 1.0
+        confidence = min(confidence, 1.0)
+        
+        if self.debug_localization:
+            print(f"  Triangulation result:")
+            print(f"    Position: ({estimated_x:.1f}, {estimated_y:.1f})mm")
+            print(f"    Confidence: {confidence:.2f}")
+            print(f"    Edges used: {list(edge_distances.keys())}")
+        
+        return estimated_x, estimated_y, confidence
             
     def calculate_turning_radius(self, steering_angle: float) -> float:
         """Calculate turning radius for given steering angle"""
