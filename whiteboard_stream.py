@@ -58,23 +58,45 @@ class WhiteboardStreamer:
         
         # Delay picamera2 import to setup_camera method
         self.Picamera2 = None
+        self.using_opencv = False
     
     def setup_camera(self):
         """Initialize and configure the Pi Camera"""
-        # Try to import picamera2 here to catch numpy errors
+        # Try to import only what we need from picamera2 to avoid simplejpeg
         try:
+            import sys
+            
+            # Temporarily mock simplejpeg to avoid the import error
+            class MockSimpleJpeg:
+                def encode_jpeg(*args, **kwargs):
+                    raise ImportError("simplejpeg disabled")
+            
+            sys.modules['simplejpeg'] = MockSimpleJpeg()
+            
             from picamera2 import Picamera2
             self.Picamera2 = Picamera2
-            print("picamera2 imported successfully")
+            print("picamera2 imported successfully (bypassing simplejpeg)")
         except Exception as e:
             print(f"ERROR: Failed to import picamera2: {e}")
-            print("This is likely a numpy version compatibility issue.")
-            print("\nTry running these commands to fix:")
-            print("sudo apt remove python3-numpy")
-            print("sudo apt install python3-numpy")
-            print("sudo apt install --reinstall python3-picamera2")
-            return False
+            print("Falling back to basic OpenCV capture...")
             
+            # Fallback to OpenCV VideoCapture
+            try:
+                self.camera = cv2.VideoCapture(0)
+                if self.camera.isOpened():
+                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                    print("Using OpenCV VideoCapture as fallback")
+                    self.using_opencv = True
+                    return True
+                else:
+                    print("OpenCV VideoCapture also failed")
+                    return False
+            except Exception as cv_e:
+                print(f"OpenCV fallback failed: {cv_e}")
+                return False
+            
+        # If we get here, picamera2 imported successfully
         try:
             self.camera = self.Picamera2()
             
@@ -85,16 +107,21 @@ class WhiteboardStreamer:
             self.camera.configure(config)
             
             print(f"Camera configured: {self.resolution[0]}x{self.resolution[1]} @ {self.framerate} FPS")
+            self.using_opencv = False
             return True
             
         except Exception as e:
-            print(f"Failed to setup camera: {e}")
+            print(f"Failed to setup picamera2 camera: {e}")
             return False
     
     def start_camera(self):
         """Start the camera capture"""
         if self.camera is None:
             return False
+            
+        if self.using_opencv:
+            # OpenCV camera is already started
+            return True
             
         try:
             self.camera.start()
@@ -232,7 +259,13 @@ class WhiteboardStreamer:
         while self.running:
             try:
                 # Capture frame from camera
-                frame = self.camera.capture_array()
+                if self.using_opencv:
+                    ret, frame = self.camera.read()
+                    if not ret or frame is None:
+                        time.sleep(0.1)
+                        continue
+                else:
+                    frame = self.camera.capture_array()
                 
                 # Process the frame
                 processed_frame = self.process_frame(frame)
