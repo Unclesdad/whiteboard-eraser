@@ -78,9 +78,9 @@ class WhiteboardStreamer:
         try:
             self.camera = self.Picamera2()
             
-            # Configure camera for continuous capture
+            # Configure camera for continuous capture - use BGR888 to avoid RGB conversion
             config = self.camera.create_preview_configuration(
-                main={"size": self.resolution, "format": "RGB888"}
+                main={"size": self.resolution, "format": "BGR888"}
             )
             self.camera.configure(config)
             
@@ -192,13 +192,13 @@ class WhiteboardStreamer:
         Process a single frame with whiteboard detection
         
         Args:
-            frame: RGB image from camera
+            frame: BGR image from camera
             
         Returns:
             Processed frame with overlays
         """
-        # Convert RGB to BGR for OpenCV processing
-        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # Frame is already in BGR format from camera
+        bgr_frame = frame
         
         # Run whiteboard detection
         detection_result = self.detector.detect_whiteboard_edges(bgr_frame)
