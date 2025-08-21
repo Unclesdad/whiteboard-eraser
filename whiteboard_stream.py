@@ -56,18 +56,23 @@ class WhiteboardStreamer:
         self.last_fps_time = time.time()
         self.fps = 0
         
-        # Try to import picamera2
+        # Delay picamera2 import to setup_camera method
+        self.Picamera2 = None
+    
+    def setup_camera(self):
+        """Initialize and configure the Pi Camera"""
+        # Try to import picamera2 here to catch numpy errors
         try:
             from picamera2 import Picamera2
             self.Picamera2 = Picamera2
             print("picamera2 imported successfully")
-        except ImportError:
-            print("ERROR: picamera2 not available. This script requires a Raspberry Pi with picamera2 installed.")
-            self.Picamera2 = None
-    
-    def setup_camera(self):
-        """Initialize and configure the Pi Camera"""
-        if self.Picamera2 is None:
+        except Exception as e:
+            print(f"ERROR: Failed to import picamera2: {e}")
+            print("This is likely a numpy version compatibility issue.")
+            print("\nTry running these commands to fix:")
+            print("sudo apt remove python3-numpy")
+            print("sudo apt install python3-numpy")
+            print("sudo apt install --reinstall python3-picamera2")
             return False
             
         try:
