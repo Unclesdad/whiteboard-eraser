@@ -20,6 +20,17 @@ class MotorController:
     _polling_freq = 7500  # 7.5 kHz polling frequency
     
     def __init__(self, pwm_pin:int, in1_pin:int, in2_pin:int, stby_pin:int, enc_a_pin:int, enc_b_pin:int):
+        """
+        Initialize motor controller with encoder support.
+        
+        Args:
+            pwm_pin: GPIO pin for PWM speed control
+            in1_pin: GPIO pin for motor direction control 1
+            in2_pin: GPIO pin for motor direction control 2  
+            stby_pin: GPIO pin for motor standby control
+            enc_a_pin: GPIO pin for encoder channel A
+            enc_b_pin: GPIO pin for encoder channel B
+        """
         GPIO.cleanup()
 
         self.PWM = pwm_pin
@@ -57,6 +68,7 @@ class MotorController:
         atexit.register(lambda: (setattr(MotorController, '_running', False), GPIO.cleanup()))
 
     def setup_gpio(self):
+        """Configure GPIO pins for motor control."""
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
 
@@ -72,6 +84,12 @@ class MotorController:
         GPIO.output(self.STBY, GPIO.HIGH)
 
     def set(self, power):
+        """
+        Set motor power and direction.
+        
+        Args:
+            power: Motor power from -1.0 to 1.0 (negative = reverse)
+        """
         power = min(max(power, -1), 1)
 
         sign = np.sign(power)
@@ -90,6 +108,7 @@ class MotorController:
 
     @classmethod
     def _start_encoder_thread(cls):
+        """Start the shared encoder polling thread at 7500Hz."""
         cls._running = True
         cls._encoder_thread = threading.Thread(target=cls._encoder_loop, daemon=True)
         cls._encoder_thread.start()
@@ -98,8 +117,8 @@ class MotorController:
     @classmethod
     def _encoder_loop(cls):
         """
-        Optimized 7.5kHz encoder polling loop
-        Uses the method we developed for high-speed accuracy
+        High-speed encoder polling loop running at 7500Hz.
+        Monitors all motor encoders simultaneously using quadrature decoding.
         """
         # Setup GPIO mode for encoder thread
         GPIO.setmode(GPIO.BCM)
@@ -140,22 +159,36 @@ class MotorController:
                 time.sleep(sleep_time)
     
     def get_position(self):
+        """
+        Get current encoder position in counts.
+        
+        Returns:
+            int: Current encoder count (positive = forward, negative = reverse)
+        """
         with MotorController._lock:
             return MotorController._encoder_positions.get(self.motor_id, 0)
     
     def reset_position(self):
-        """Reset encoder position to zero"""
+        """Reset encoder position to zero."""
         with MotorController._lock:
             MotorController._encoder_positions[self.motor_id] = 0
     
     def get_speed(self, window_time=0.5):
-        """Get motor speed in counts per second"""
+        """
+        Calculate motor speed by measuring position change over time.
+        
+        Args:
+            window_time: Time window in seconds for speed calculation
+            
+        Returns:
+            float: Speed in encoder counts per second
+        """
         start_pos = self.get_position()
         time.sleep(window_time)
         end_pos = self.get_position()
         return (end_pos - start_pos) / window_time
 
-def main():
+def test_motor_controller():
     # Updated pin assignments to match our testing
     motor = MotorController(18, 23, 24, 22, 17, 27)  # Using pins 17, 27 for encoder
 
@@ -185,4 +218,4 @@ def main():
     set_then_wait(0,10)
 
 if __name__ == '__main__':
-    main()
+    test_motor_controller()
