@@ -15,21 +15,11 @@ fi
 echo "Updating system packages..."
 sudo apt update
 
-# Install required system packages
+# Install required system packages (use system packages to avoid numpy conflicts)
 echo "Installing system dependencies..."
-sudo apt install -y python3-pip python3-flask python3-opencv python3-numpy
+sudo apt install -y python3-flask python3-opencv python3-numpy python3-picamera2
 
-# picamera2 should already be installed on Pi OS, but install if missing
-if ! python3 -c "import picamera2" 2>/dev/null; then
-    echo "Installing picamera2..."
-    sudo apt install -y python3-picamera2
-else
-    echo "picamera2 already installed"
-fi
-
-# Install Python packages from requirements
-echo "Installing Python dependencies..."
-pip3 install -r requirements.txt --user --break-system-packages
+echo "All dependencies installed using system packages to avoid version conflicts"
 
 # Make scripts executable
 chmod +x whiteboard_stream.py
