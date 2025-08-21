@@ -29,7 +29,7 @@ fi
 
 # Install Python packages from requirements
 echo "Installing Python dependencies..."
-pip3 install -r requirements.txt --user
+pip3 install -r requirements.txt --user --break-system-packages
 
 # Make scripts executable
 chmod +x whiteboard_stream.py
