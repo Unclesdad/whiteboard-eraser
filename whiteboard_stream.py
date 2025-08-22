@@ -113,14 +113,15 @@ class WhiteboardStreamer:
             )
             self.camera.configure(config)
             
-            # Set camera controls to fix color issues
+            # Set camera controls to fix color issues - try tungsten for indoor lighting
             controls = {
                 "AwbEnable": True,
-                "AwbMode": 1,  # Daylight white balance (try this first)
+                "AwbMode": 2,  # Tungsten/incandescent white balance for indoor
                 "AeEnable": True,  # Auto exposure
-                "Brightness": 0.0,
-                "Contrast": 1.2,  # Slightly higher contrast
-                "Saturation": 1.1  # Slightly higher saturation
+                "Brightness": 0.1,
+                "Contrast": 1.3,
+                "Saturation": 1.2,
+                "ColourGains": (1.8, 1.2)  # Manual red/blue gain adjustment
             }
             
             try:
@@ -237,6 +238,23 @@ class WhiteboardStreamer:
         
         return result
     
+    def correct_color_cast(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Apply software color correction to reduce blue cast
+        """
+        # Split BGR channels
+        b, g, r = cv2.split(frame)
+        
+        # Reduce blue channel and boost red/green
+        b = cv2.multiply(b, 0.7)  # Reduce blue by 30%
+        r = cv2.multiply(r, 1.2)  # Boost red by 20%
+        g = cv2.multiply(g, 1.1)  # Boost green by 10%
+        
+        # Merge channels back
+        corrected = cv2.merge([b, g, r])
+        
+        return corrected
+    
     def create_display_frame(self, frame: np.ndarray) -> np.ndarray:
         """
         Create display frame with current detection results overlaid
@@ -247,19 +265,22 @@ class WhiteboardStreamer:
         Returns:
             Frame with overlays and status info
         """
+        # Apply color correction to reduce blue cast
+        corrected_frame = self.correct_color_cast(frame)
+        
         if self.last_detection_result is not None:
             detected_lines, markings, marking_regions = self.last_detection_result
             
-            # Create visualization overlay
-            processed_frame = self.create_overlay_visualization(frame, detected_lines, markings)
+            # Create visualization overlay on color-corrected frame
+            processed_frame = self.create_overlay_visualization(corrected_frame, detected_lines, markings)
             
             # Add status text
             status_text = f"Edges: {len(detected_lines)}, Markings: {len(marking_regions)} regions"
             cv2.putText(processed_frame, status_text, (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         else:
-            # No detection - just show original frame with status
-            processed_frame = frame.copy()
+            # No detection - just show color-corrected frame with status
+            processed_frame = corrected_frame.copy()
             cv2.putText(processed_frame, "No whiteboard detected", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
