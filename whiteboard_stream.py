@@ -113,6 +113,22 @@ class WhiteboardStreamer:
             )
             self.camera.configure(config)
             
+            # Set camera controls to fix color issues
+            controls = {
+                "AwbEnable": True,
+                "AwbMode": 1,  # Daylight white balance (try this first)
+                "AeEnable": True,  # Auto exposure
+                "Brightness": 0.0,
+                "Contrast": 1.2,  # Slightly higher contrast
+                "Saturation": 1.1  # Slightly higher saturation
+            }
+            
+            try:
+                self.camera.set_controls(controls)
+                print("Camera color controls applied")
+            except Exception as e:
+                print(f"Warning: Could not set camera controls: {e}")
+            
             print(f"Camera configured: {self.resolution[0]}x{self.resolution[1]} @ {self.framerate} FPS")
             self.using_opencv = False
             return True
