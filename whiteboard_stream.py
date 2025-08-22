@@ -35,7 +35,7 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 class WhiteboardStreamer:
-    def __init__(self, resolution=(640, 480), framerate=10):
+    def __init__(self, resolution=(640, 480), framerate=15):
         """
         Initialize the whiteboard streaming system
         
@@ -55,6 +55,13 @@ class WhiteboardStreamer:
         self.frame_count = 0
         self.last_fps_time = time.time()
         self.fps = 0
+        
+        # Async processing - separate threads for capture and detection
+        self.raw_frame = None
+        self.raw_frame_lock = threading.Lock()
+        self.processing = False
+        self.processing_lock = threading.Lock()
+        self.last_detection_result = None
         
         # Delay picamera2 import to setup_camera method
         self.Picamera2 = None
@@ -214,27 +221,21 @@ class WhiteboardStreamer:
         
         return result
     
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+    def create_display_frame(self, frame: np.ndarray) -> np.ndarray:
         """
-        Process a single frame with whiteboard detection
+        Create display frame with current detection results overlaid
         
         Args:
-            frame: BGR image from camera
+            frame: Raw BGR image from camera
             
         Returns:
-            Processed frame with overlays
+            Frame with overlays and status info
         """
-        # Frame is already in BGR format from camera
-        bgr_frame = frame
-        
-        # Run whiteboard detection
-        detection_result = self.detector.detect_whiteboard_edges(bgr_frame)
-        
-        if detection_result is not None:
-            detected_lines, markings, marking_regions = detection_result
+        if self.last_detection_result is not None:
+            detected_lines, markings, marking_regions = self.last_detection_result
             
             # Create visualization overlay
-            processed_frame = self.create_overlay_visualization(bgr_frame, detected_lines, markings)
+            processed_frame = self.create_overlay_visualization(frame, detected_lines, markings)
             
             # Add status text
             status_text = f"Edges: {len(detected_lines)}, Markings: {len(marking_regions)} regions"
@@ -242,19 +243,63 @@ class WhiteboardStreamer:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         else:
             # No detection - just show original frame with status
-            processed_frame = bgr_frame.copy()
+            processed_frame = frame.copy()
             cv2.putText(processed_frame, "No whiteboard detected", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
-        # Add FPS counter
-        cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", (10, processed_frame.shape[0] - 10), 
+        # Add FPS counter and processing status
+        with self.processing_lock:
+            processing_status = "PROCESSING..." if self.processing else "READY"
+        
+        cv2.putText(processed_frame, f"FPS: {self.fps:.1f} | {processing_status}", (10, processed_frame.shape[0] - 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return processed_frame
     
+    def detection_worker(self):
+        """
+        Background thread that processes frames when available
+        """
+        print("Detection worker started")
+        
+        while self.running:
+            # Check if there's a new frame to process and we're not already processing
+            with self.processing_lock:
+                if self.processing:
+                    time.sleep(0.01)  # Short sleep if already processing
+                    continue
+                    
+                with self.raw_frame_lock:
+                    if self.raw_frame is None:
+                        time.sleep(0.01)  # No frame available
+                        continue
+                    
+                    # Take the frame for processing
+                    frame_to_process = self.raw_frame.copy()
+                    self.raw_frame = None  # Clear the frame
+                
+                # Set processing flag
+                self.processing = True
+            
+            try:
+                # Run detection on this frame
+                detection_result = self.detector.detect_whiteboard_edges(frame_to_process)
+                self.last_detection_result = detection_result
+                
+            except Exception as e:
+                print(f"Detection error: {e}")
+            
+            finally:
+                # Clear processing flag
+                with self.processing_lock:
+                    self.processing = False
+    
     def capture_loop(self):
         """Main capture and processing loop"""
         print("Starting capture loop...")
+        
+        consecutive_failures = 0
+        max_failures = 10
         
         while self.running:
             try:
@@ -262,17 +307,30 @@ class WhiteboardStreamer:
                 if self.using_opencv:
                     ret, frame = self.camera.read()
                     if not ret or frame is None:
-                        time.sleep(0.1)
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_failures:
+                            print("Too many consecutive frame capture failures")
+                            break
+                        time.sleep(0.5)
                         continue
                 else:
                     frame = self.camera.capture_array()
                 
-                # Process the frame
-                processed_frame = self.process_frame(frame)
+                # Reset failure counter on successful capture
+                consecutive_failures = 0
+                
+                # Send frame to detection worker if not already processing
+                with self.processing_lock:
+                    if not self.processing:
+                        with self.raw_frame_lock:
+                            self.raw_frame = frame.copy()
+                
+                # Create display frame with current detection results
+                display_frame = self.create_display_frame(frame)
                 
                 # Update shared frame buffer
                 with self.frame_lock:
-                    self.current_frame = processed_frame
+                    self.current_frame = display_frame
                 
                 # Update FPS counter
                 self.frame_count += 1
@@ -286,8 +344,14 @@ class WhiteboardStreamer:
                 time.sleep(1.0 / self.framerate)
                 
             except Exception as e:
-                print(f"Error in capture loop: {e}")
-                time.sleep(0.1)
+                consecutive_failures += 1
+                print(f"Error in capture loop: {e} (failure #{consecutive_failures})")
+                
+                if consecutive_failures >= max_failures:
+                    print("Too many consecutive failures, stopping capture")
+                    break
+                    
+                time.sleep(1.0)  # Wait longer on errors
     
     def get_frame(self) -> Optional[bytes]:
         """
@@ -314,10 +378,16 @@ class WhiteboardStreamer:
             return False
         
         self.running = True
+        
+        # Start capture thread
         self.capture_thread = threading.Thread(target=self.capture_loop, daemon=True)
         self.capture_thread.start()
         
-        print("Streaming started")
+        # Start detection worker thread
+        self.detection_thread = threading.Thread(target=self.detection_worker, daemon=True)
+        self.detection_thread.start()
+        
+        print("Streaming started with async detection")
         return True
     
     def stop_streaming(self):
