@@ -130,8 +130,9 @@ class WhiteboardCameraStream:
             self.camera = Picamera2()
             
             # Create configuration for video streaming (like camera_stream.py)
+            # Remove format specification to let camera use natural format
             config = self.camera.create_video_configuration(
-                main={"size": (self.stream_width, self.stream_height), "format": "RGB888"}
+                main={"size": (self.stream_width, self.stream_height)}
             )
             
             # Configure the camera
