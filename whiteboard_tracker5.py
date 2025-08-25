@@ -43,21 +43,30 @@ class WhiteboardTracker5:
         combined_std = (bottom_std + top_std) / 2
         overall_range = gray.max() - gray.min()
         
-        # Low contrast indicators:
-        # 1. Small difference between whiteboard and background
-        # 2. High mean intensities (bright scene) 
-        # 3. Both regions are relatively bright
-        is_low_intensity_diff = intensity_difference < 40  # More sensitive
-        is_bright_scene = (bottom_mean + top_mean) / 2 > 160  # Lower threshold
-        is_both_bright = bottom_mean > 150 and top_mean > 150  # Both regions bright
+        # More conservative low contrast detection to avoid false classification
+        # Calculate additional metrics for better classification
+        whiteboard_std = bottom_region.std()
+        background_std = top_region.std()
+        local_contrast_ratio = intensity_difference / max(combined_std, 1)
         
-        # Consider low contrast if any of these conditions are met
-        is_low_contrast = is_low_intensity_diff or is_bright_scene or is_both_bright
+        # True low contrast scenarios have:
+        # 1. Very small intensity difference AND high brightness
+        # 2. Low local contrast variation
+        # 3. Both regions very bright with minimal texture
+        
+        is_very_low_diff = intensity_difference < 25  # Stricter threshold
+        is_very_bright = (bottom_mean + top_mean) / 2 > 180  # Higher brightness requirement
+        is_low_texture = whiteboard_std < 15 and background_std < 15  # Smooth regions
+        is_poor_local_contrast = local_contrast_ratio < 2.0  # Poor contrast ratio
+        
+        # Require multiple conditions for low contrast classification
+        is_low_contrast = (is_very_low_diff and is_very_bright and 
+                          (is_low_texture or is_poor_local_contrast))
         
         if self.debug:
             print(f"  Scene analysis: intensity_diff={intensity_difference:.1f}, "
-                  f"bottom_mean={bottom_mean:.1f}, top_mean={top_mean:.1f}, "
-                  f"bright_scene={is_bright_scene}, both_bright={is_both_bright}, "
+                  f"brightness={(bottom_mean + top_mean) / 2:.1f}, "
+                  f"contrast_ratio={local_contrast_ratio:.2f}, "
                   f"low_contrast={is_low_contrast}")
         
         return is_low_contrast
@@ -67,12 +76,12 @@ class WhiteboardTracker5:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         
-        # Focus on bottom 70% where whiteboard surface appears
-        bottom_start = int(h * 0.3)
+        # Focus on bottom 80% where whiteboard surface appears (expanded coverage)
+        bottom_start = int(h * 0.2)  # Changed from 0.3 to 0.2 to cover more area
         bottom_region = gray[bottom_start:, :]
         
         if self.debug:
-            print(f"  Processing region: {w}x{h-bottom_start} (bottom 70%)")
+            print(f"  Processing region: {w}x{h-bottom_start} (bottom 80%)")
         
         # Use adaptive thresholding for better whiteboard detection
         # Whiteboard should be consistently bright
@@ -295,6 +304,94 @@ class WhiteboardTracker5:
         
         return filtered_edges
     
+    def validate_line_geometry(self, rho: float, theta: float, h: int, w: int) -> bool:
+        """Validate if a line makes geometric sense for a whiteboard boundary"""
+        angle_deg = np.degrees(theta)
+        
+        # Basic orientation check
+        is_reasonable_angle = (
+            abs(angle_deg) < 30 or abs(angle_deg - 90) < 30 or  # Horizontal or vertical ±30°
+            abs(angle_deg - 180) < 30 or  # Horizontal wraparound
+            (30 < angle_deg < 60) or (120 < angle_deg < 150)  # Reasonable diagonals
+        )
+        
+        if not is_reasonable_angle:
+            return False
+        
+        # Position-based validation
+        a, b = np.cos(theta), np.sin(theta)
+        
+        # Check if line position makes sense
+        if abs(b) > 0.001:  # Non-vertical line
+            # Calculate y-positions at left and right edges
+            y_left = rho / b
+            y_right = (rho - w * a) / b
+            
+            # Line should intersect image in reasonable region (bottom 80%)
+            # Check if ANY part of the line is in valid region
+            min_y = min(y_left, y_right)
+            max_y = max(y_left, y_right)
+            
+            # Line should pass through the image bounds and be in reasonable region
+            line_in_image = (min_y <= h and max_y >= 0)
+            line_in_whiteboard_region = (max_y > h * 0.2)  # At least part in bottom 80%
+            
+            if not (line_in_image and line_in_whiteboard_region):
+                return False
+        
+        if abs(a) > 0.001:  # Non-horizontal line  
+            # For vertical-ish lines, check if line passes through reasonable x range
+            # Calculate x positions at top and bottom of image
+            x_top = (rho - 0 * b) / a if abs(b) < 0.001 else rho / a
+            x_bottom = (rho - h * b) / a
+            
+            min_x = min(x_top, x_bottom)  
+            max_x = max(x_top, x_bottom)
+            
+            # Line should intersect the image in x direction
+            line_intersects_image = (min_x <= w and max_x >= 0)
+            
+            if not line_intersects_image:
+                return False
+        
+        return True
+    
+    def detect_right_edge_simple(self, image: np.ndarray, surface_mask: np.ndarray) -> Optional[Tuple[float, float]]:
+        """Simple right edge detection for wall-mounted whiteboards"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        
+        # Focus on right 40% where vertical edge should be
+        right_start = int(w * 0.6)
+        right_region = gray[:, right_start:]
+        right_mask_region = surface_mask[:, right_start:]
+        
+        if np.count_nonzero(right_mask_region) < 50:
+            return None
+        
+        # Look for vertical edges using simple gradient
+        grad_x = cv2.Sobel(right_region, cv2.CV_64F, 1, 0, ksize=3)
+        grad_magnitude = np.abs(grad_x)
+        
+        # Find strongest vertical gradient column
+        column_strengths = np.mean(grad_magnitude[int(h*0.3):, :], axis=0)  # Bottom 70% only
+        
+        if len(column_strengths) == 0:
+            return None
+        
+        # Find peak column and convert to global coordinates
+        peak_col = np.argmax(column_strengths)
+        global_x = right_start + peak_col
+        
+        # Check if gradient is strong enough
+        if column_strengths[peak_col] > np.percentile(column_strengths, 70):
+            # Return vertical line at this x position
+            rho = float(global_x)
+            theta = np.pi / 2  # 90 degrees = vertical line
+            return (rho, theta)
+        
+        return None
+    
     def find_whiteboard_lines(self, edges: np.ndarray) -> List[Tuple[float, float]]:
         """Simplified line detection with slope-based filtering"""
         h, w = edges.shape
@@ -330,6 +427,12 @@ class WhiteboardTracker5:
             
             # Accept reasonable edge orientations
             if is_diagonal or is_horizontal or is_vertical:
+                # Geometric validation first
+                if not self.validate_line_geometry(rho, theta, h, w):
+                    if self.debug:
+                        print(f"    Rejected (bad geometry): angle={angle_deg:.1f}°, rho={rho:.1f}")
+                    continue
+                
                 # Quick line quality check
                 support_score = self.score_line_fast(rho, theta, edges, h, w)
                 
@@ -338,7 +441,9 @@ class WhiteboardTracker5:
                 if support_score > min_support:
                     valid_lines.append((rho, theta, support_score))
                     if self.debug:
-                        print(f"    Line: angle={angle_deg:.1f}°, rho={rho:.1f}, support={support_score:.3f}")
+                        print(f"    Valid line: angle={angle_deg:.1f}°, rho={rho:.1f}, support={support_score:.3f}")
+                elif self.debug:
+                    print(f"    Rejected (low support): angle={angle_deg:.1f}°, support={support_score:.3f}")
         
         # Sort by support score and return best lines
         valid_lines.sort(key=lambda x: x[2], reverse=True)
@@ -413,79 +518,179 @@ class WhiteboardTracker5:
     
     def detect_markings_20x20(self, image: np.ndarray, surface_mask: np.ndarray, 
                              edge_lines: List[Tuple[float, float]] = None) -> List[Tuple[int, int]]:
-        """Detect dry-erase markings and return 20x20 pixel box centers"""
+        """Detect dry-erase markings using contrast-based detection within whiteboard boundaries"""
+        markings_start_time = time.time()
         h, w = image.shape[:2]
         
-        # Create search region (whiteboard surface below edge lines)
-        search_mask = surface_mask.copy()
+        # Require detected edges to proceed - no edges means no valid whiteboard area
+        if not edge_lines:
+            if self.debug:
+                print("  No edge lines provided - skipping marking detection")
+            return []
         
-        if edge_lines:
-            # Restrict search to area below detected edges
-            below_edges_mask = np.ones((h, w), dtype=np.uint8) * 255
+        # Create whiteboard interior mask based on actual detected edge geometry
+        interior_mask = self.create_whiteboard_interior_mask(image, edge_lines)
+        
+        if np.count_nonzero(interior_mask) < 100:
+            if self.debug:
+                print("  Insufficient whiteboard interior area detected")
+            return []
+        
+        # Create exclusion zones around detected edge lines to avoid detecting edges as markings
+        exclusion_mask = np.zeros((h, w), dtype=np.uint8)
+        buffer_distance = 25  # Pixels to exclude around edge lines
+        
+        for rho, theta in edge_lines:
+            a, b = np.cos(theta), np.sin(theta)
             
-            for rho, theta in edge_lines:
-                a, b = np.cos(theta), np.sin(theta)
-                line_mask = np.zeros((h, w), dtype=np.uint8)
+            # Create thick line around the detected edge
+            for offset in range(-buffer_distance, buffer_distance + 1):
+                offset_rho = rho + offset
                 
-                # Mark area below this line
+                # Draw line with offset
                 for x in range(w):
                     if abs(b) > 0.001:
-                        y_line = (rho - x * a) / b
-                        if 0 <= y_line <= h:
-                            line_mask[int(y_line):, x] = 255
+                        y_line = (offset_rho - x * a) / b
+                        if 0 <= y_line < h:
+                            exclusion_mask[int(y_line), x] = 255
                 
-                below_edges_mask = cv2.bitwise_and(below_edges_mask, line_mask)
-            
-            search_mask = cv2.bitwise_and(search_mask, below_edges_mask)
+                # Also handle nearly vertical lines
+                if abs(a) > 0.001:
+                    for y in range(h):
+                        x_line = (offset_rho - y * b) / a
+                        if 0 <= x_line < w:
+                            exclusion_mask[y, int(x_line)] = 255
         
-        # Convert to HSV for color detection
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        hsv_region = cv2.bitwise_and(hsv, hsv, mask=search_mask)
+        # Apply morphological operations to create buffer zones
+        kernel_buffer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (buffer_distance//2, buffer_distance//2))
+        exclusion_mask = cv2.dilate(exclusion_mask, kernel_buffer, iterations=1)
         
-        # Expanded marker color ranges with lower saturation thresholds
-        color_ranges = [
-            # Purple/violet range 1 (lighter purple)
-            [(110, 20, 30), (140, 255, 255)],
-            # Purple/violet range 2 (darker purple)  
-            [(140, 20, 30), (170, 255, 255)],
-            # Blue range (expanded)
-            [(90, 30, 30), (130, 255, 255)],
-            # Red range 1 (lower hue)
-            [(0, 30, 30), (15, 255, 255)],
-            # Red range 2 (higher hue - wraparound)
-            [(165, 30, 30), (180, 255, 255)],
-            # Green range (for completeness)
-            [(40, 30, 30), (80, 255, 255)]
-        ]
+        # Final search area: whiteboard interior minus exclusion zones
+        search_mask = cv2.bitwise_and(interior_mask, cv2.bitwise_not(exclusion_mask))
         
+        if self.debug:
+            search_pixels = np.count_nonzero(search_mask)
+            excluded_pixels = np.count_nonzero(exclusion_mask)
+            interior_pixels = np.count_nonzero(interior_mask)
+            print(f"  Whiteboard interior: {interior_pixels} pixels")
+            print(f"  Excluded around edges: {excluded_pixels} pixels") 
+            print(f"  Final search area: {search_pixels} pixels")
+        
+        # Now use contrast-based detection instead of HSV color detection
+        marking_boxes = self.detect_contrast_markings(image, search_mask)
+        
+        markings_time = time.time() - markings_start_time
+        if self.debug:
+            print(f"  Total marking detection time: {markings_time:.4f}s")
+        
+        return marking_boxes
+    
+    def detect_contrast_markings(self, image: np.ndarray, search_mask: np.ndarray) -> List[Tuple[int, int]]:
+        """Detect markings using contrast-based analysis - color agnostic approach"""
+        h, w = image.shape[:2]
+        
+        # Convert to grayscale for contrast analysis
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        search_region = cv2.bitwise_and(gray, gray, mask=search_mask)
+        
+        # Calculate whiteboard surface statistics within search area
+        if np.count_nonzero(search_mask) == 0:
+            return []
+        
+        wb_pixels = search_region[search_mask > 0]
+        wb_mean = np.mean(wb_pixels)
+        wb_std = np.std(wb_pixels)
+        
+        if self.debug:
+            print(f"  Whiteboard statistics: mean={wb_mean:.1f}, std={wb_std:.1f}")
+        
+        # Multi-level adaptive thresholding to catch both bold and faint markings
         all_markings = np.zeros((h, w), dtype=np.uint8)
         
-        # Detect each color
-        for lower, upper in color_ranges:
-            color_mask = cv2.inRange(hsv_region, np.array(lower), np.array(upper))
+        # Level 1: Bold markings (significant contrast)
+        bold_threshold = wb_mean - max(30, wb_std * 2.0)  # Markings significantly darker than surface
+        bold_mask = (search_region < bold_threshold) & (search_mask > 0)
+        bold_markings = bold_mask.astype(np.uint8) * 255
+        
+        # Level 2: Medium markings (moderate contrast) 
+        medium_threshold = wb_mean - max(20, wb_std * 1.5)
+        medium_mask = (search_region < medium_threshold) & (search_mask > 0)
+        medium_markings = medium_mask.astype(np.uint8) * 255
+        
+        # Level 3: Faint markings (subtle contrast) - for cases like the obvious purple marking
+        faint_threshold = wb_mean - max(15, wb_std * 1.0)
+        faint_mask = (search_region < faint_threshold) & (search_mask > 0)
+        faint_markings = faint_mask.astype(np.uint8) * 255
+        
+        if self.debug:
+            bold_pixels = np.count_nonzero(bold_markings)
+            medium_pixels = np.count_nonzero(medium_markings)
+            faint_pixels = np.count_nonzero(faint_markings)
+            print(f"  Thresholds - Bold: {bold_threshold:.1f} ({bold_pixels} px), Medium: {medium_threshold:.1f} ({medium_pixels} px), Faint: {faint_threshold:.1f} ({faint_pixels} px)")
+        
+        # Process each level with appropriate validation
+        for level, (marking_mask, level_name) in enumerate([
+            (bold_markings, "bold"),
+            (medium_markings, "medium"), 
+            (faint_markings, "faint")
+        ]):
+            if np.count_nonzero(marking_mask) == 0:
+                continue
+                
+            # Clean up noise with morphological operations
+            if level == 0:  # Bold markings - minimal cleanup
+                cleaned = cv2.morphologyEx(marking_mask, cv2.MORPH_OPEN, self.kernel_3x3)
+            elif level == 1:  # Medium markings - moderate cleanup
+                cleaned = cv2.morphologyEx(marking_mask, cv2.MORPH_OPEN, self.kernel_3x3)
+                cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, self.kernel_3x3)
+            else:  # Faint markings - more aggressive cleanup
+                cleaned = cv2.morphologyEx(marking_mask, cv2.MORPH_OPEN, self.kernel_3x3)
+                cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, self.kernel_5x5)
             
-            # Minimal cleanup
-            color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, self.kernel_3x3)
-            
-            # Filter small noise with lower threshold for better detection
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
+            # Connected component analysis and validation
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
             
             for i in range(1, num_labels):
-                if stats[i, cv2.CC_STAT_AREA] >= 8:  # Lower threshold for marking pixels
-                    component_mask = (labels == i).astype(np.uint8) * 255
-                    all_markings = cv2.bitwise_or(all_markings, component_mask)
-                    
+                area = stats[i, cv2.CC_STAT_AREA]
+                width = stats[i, cv2.CC_STAT_WIDTH]
+                height = stats[i, cv2.CC_STAT_HEIGHT]
+                x = stats[i, cv2.CC_STAT_LEFT]
+                y = stats[i, cv2.CC_STAT_TOP]
+                
+                # Size validation - adaptive based on level
+                min_area = 8 if level == 2 else 12  # Lower threshold for faint markings
+                max_area = 50000  # Prevent huge regions
+                if area < min_area or area > max_area:
                     if self.debug:
-                        color_idx = color_ranges.index([lower, upper])
-                        color_names = ["light_purple", "dark_purple", "blue", "red1", "red2", "green"]
-                        print(f"    Found {color_names[color_idx]} marking: {stats[i, cv2.CC_STAT_AREA]} pixels")
+                        print(f"    {level_name} component {i}: REJECTED size ({area} pixels)")
+                    continue
+                
+                # Shape validation
+                aspect_ratio = max(width, height) / max(min(width, height), 1)
+                if aspect_ratio > 15:  # Allow slightly more elongated shapes than color detection
+                    if self.debug:
+                        print(f"    {level_name} component {i}: REJECTED shape (ratio {aspect_ratio:.1f})")
+                    continue
+                
+                # Position validation - ensure not too close to search area boundaries
+                margin = 5  # Smaller margin since we're already within detected boundaries
+                if (x < margin or y < margin or 
+                    x + width > w - margin or y + height > h - margin):
+                    continue
+                
+                # Add valid component to final markings
+                component_mask = (labels == i).astype(np.uint8) * 255
+                all_markings = cv2.bitwise_or(all_markings, component_mask)
+                
+                if self.debug:
+                    print(f"    {level_name} component {i}: ACCEPTED ({area} pixels, {width}x{height})")
         
         # Extract marking centers and create 20x20 boxes
         marking_boxes = self.extract_marking_boxes_20x20(all_markings)
         
         if self.debug:
             total_pixels = np.count_nonzero(all_markings)
-            print(f"  Marking pixels: {total_pixels}, 20x20 boxes: {len(marking_boxes)}")
+            print(f"  Final contrast markings: {total_pixels} pixels, {len(marking_boxes)} boxes")
         
         return marking_boxes
     
@@ -540,18 +745,61 @@ class WhiteboardTracker5:
                     print("  Insufficient whiteboard surface area detected")
                 return None
             
-            # Step 2: Adaptive edge detection based on scene analysis
-            if self.is_low_contrast_scene:
+            # Step 2: Hybrid edge detection strategy - try standard first, then supplement if needed
+            if self.debug:
+                print("  Trying standard edge detection first")
+            
+            # Always try standard detection first
+            edges = self.detect_whiteboard_boundary_edges(image, surface_mask)
+            edge_lines = self.find_whiteboard_lines(edges)
+            
+            # If insufficient lines found, supplement with gradient-based detection
+            if len(edge_lines) < 2 and self.is_low_contrast_scene:
                 if self.debug:
-                    print("  Using gradient-based edge detection for low contrast scene")
-                edges = self.detect_edges_gradient_based(image, surface_mask)
+                    print(f"  Standard detection found {len(edge_lines)} lines, supplementing with gradient-based")
+                
+                # Try gradient-based detection 
+                gradient_edges = self.detect_edges_gradient_based(image, surface_mask)
+                gradient_lines = self.find_whiteboard_lines(gradient_edges)
+                
+                # Combine results, avoiding duplicates
+                combined_lines = edge_lines.copy()
+                for grad_rho, grad_theta in gradient_lines:
+                    is_duplicate = False
+                    grad_angle = np.degrees(grad_theta)
+                    
+                    for exist_rho, exist_theta in combined_lines:
+                        exist_angle = np.degrees(exist_theta)
+                        angle_diff = min(abs(grad_angle - exist_angle),
+                                       abs(grad_angle - exist_angle + 180),
+                                       abs(grad_angle - exist_angle - 180))
+                        rho_diff = abs(grad_rho - exist_rho)
+                        
+                        if angle_diff < 10 and rho_diff < 20:  # Similar line
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        combined_lines.append((grad_rho, grad_theta))
+                
+                edge_lines = combined_lines[:3]  # Limit to max 3 lines
+                
+                if self.debug:
+                    print(f"  Combined detection: {len(edge_lines)} total lines")
             else:
                 if self.debug:
-                    print("  Using standard edge detection for high contrast scene")
-                edges = self.detect_whiteboard_boundary_edges(image, surface_mask)
+                    print(f"  Standard detection sufficient: {len(edge_lines)} lines")
             
-            # Step 3: Simplified line detection with validation
-            edge_lines = self.find_whiteboard_lines(edges)
+            # Step 3: Targeted right edge detection for wall scenarios
+            if len(edge_lines) == 1 and self.is_low_contrast_scene:
+                if self.debug:
+                    print("  Attempting targeted right edge detection for wall scenario")
+                
+                right_edge = self.detect_right_edge_simple(image, surface_mask)
+                if right_edge is not None:
+                    edge_lines.append(right_edge)
+                    if self.debug:
+                        print("  Added right edge candidate")
             
             # Step 4: Improved marking detection with 20x20 boxes
             marking_boxes = self.detect_markings_20x20(image, surface_mask, edge_lines)
@@ -581,6 +829,143 @@ class WhiteboardTracker5:
     def get_average_processing_time(self) -> float:
         """Return average processing time for performance monitoring"""
         return np.mean(self.processing_times) if self.processing_times else 0.0
+    
+    def create_whiteboard_interior_mask(self, image: np.ndarray, edge_lines: List[Tuple[float, float]]) -> np.ndarray:
+        """Create mask for whiteboard interior area based on detected edge geometry"""
+        mask_start_time = time.time()
+        h, w = image.shape[:2]
+        interior_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        if not edge_lines:
+            return interior_mask
+        
+        # Find left and right edge boundaries
+        left_boundary = None
+        right_boundary = None
+        top_boundary = 0  # Start with image top (whiteboard is below edges)
+        
+        for rho, theta in edge_lines:
+            angle_deg = np.degrees(theta)
+            
+            # Classify edge orientation
+            is_vertical_ish = 75 < abs(angle_deg) < 105 or 75 < abs(angle_deg - 180) < 105
+            is_horizontal_ish = abs(angle_deg) < 15 or abs(angle_deg - 180) < 15
+            
+            if is_vertical_ish:
+                # Vertical edge - could be left or right boundary
+                a, b = np.cos(theta), np.sin(theta)
+                if abs(a) > 0.001:
+                    x_pos = rho / a  # X position of vertical line
+                    if x_pos < w/2:  # Left side of image
+                        if left_boundary is None or x_pos > left_boundary:
+                            left_boundary = x_pos
+                    else:  # Right side of image  
+                        if right_boundary is None or x_pos < right_boundary:
+                            right_boundary = x_pos
+            
+            elif is_horizontal_ish:
+                # Horizontal edge - likely top boundary (whiteboard is below this)
+                a, b = np.cos(theta), np.sin(theta)
+                if abs(b) > 0.001:
+                    # Calculate average Y position across image width
+                    y_positions = []
+                    for x in range(0, w, w//10):  # Sample 10 points
+                        y_line = (rho - x * a) / b
+                        if 0 <= y_line < h:
+                            y_positions.append(y_line)
+                    if y_positions:
+                        avg_y = sum(y_positions) / len(y_positions)
+                        if avg_y > top_boundary:  # Find the lowest horizontal edge
+                            top_boundary = int(avg_y)
+        
+        # Vectorized approach: create coordinate grids once
+        y_coords, x_coords = np.mgrid[0:h, 0:w]
+        
+        # Start with all pixels as potential interior (will be filtered down)
+        is_below_all_edges = np.ones((h, w), dtype=bool)
+        
+        # Check each edge line using vectorized operations
+        for rho, theta in edge_lines:
+            a, b = np.cos(theta), np.sin(theta)
+            
+            # For non-vertical lines, check if pixels are below the line
+            if abs(b) > 0.001:  # Non-vertical line
+                # Vectorized calculation: edge_y_at_x = (rho - x * a) / b
+                edge_y_grid = (rho - x_coords * a) / b
+                
+                # Pixels must be below the edge line (with 10 pixel buffer)
+                # Use logical AND to accumulate constraints from all edges
+                is_below_all_edges &= (y_coords >= edge_y_grid + 10)
+        
+        # Convert boolean mask to uint8 and apply to interior_mask
+        interior_mask[is_below_all_edges] = 255
+        
+        # Additional safety: zero out top 20% of image to prevent background detection
+        interior_mask[:int(h * 0.2), :] = 0
+        
+        mask_time = time.time() - mask_start_time
+        
+        if self.debug:
+            interior_pixels = np.count_nonzero(interior_mask)
+            print(f"  Whiteboard interior (below edges): {interior_pixels} pixels ({interior_pixels/(h*w)*100:.1f}% of image)")
+            print(f"  Interior mask creation time: {mask_time:.4f}s")
+        
+        return interior_mask
+
+    def save_debug_visualization(self, image: np.ndarray, marking_boxes: List[Tuple[int, int]], 
+                               edge_lines: List[Tuple[float, float]], filename: str) -> None:
+        """Save debug visualization with bounding boxes and detected edges"""
+        debug_img = image.copy()
+        h, w = image.shape[:2]
+        
+        # Draw detected edge lines in red and green (like original debug image)
+        colors = [(0, 0, 255), (0, 255, 0)]  # Red, Green
+        for i, (rho, theta) in enumerate(edge_lines):
+            color = colors[i % len(colors)]
+            a, b = np.cos(theta), np.sin(theta)
+            
+            # Draw line across the full image
+            if abs(b) > 0.001:  # Not nearly vertical
+                # Calculate line endpoints
+                y1 = int(rho / b) if b != 0 else 0
+                y2 = int((rho - w * a) / b) if b != 0 else h
+                x1, x2 = 0, w
+                
+                # Clamp to image bounds
+                if y1 < 0:
+                    x1 = int(-rho / a) if a != 0 else 0
+                    y1 = 0
+                if y2 >= h:
+                    x2 = int((rho - (h-1) * b) / a) if a != 0 else w
+                    y2 = h - 1
+                if y1 >= h:
+                    x1 = int((rho - (h-1) * b) / a) if a != 0 else 0
+                    y1 = h - 1
+                if y2 < 0:
+                    x2 = int(-rho / a) if a != 0 else w
+                    y2 = 0
+                    
+                cv2.line(debug_img, (max(0, min(w-1, x1)), max(0, min(h-1, y1))), 
+                        (max(0, min(w-1, x2)), max(0, min(h-1, y2))), color, 3)
+            else:  # Nearly vertical line
+                x_line = int(rho / a) if abs(a) > 0.001 else 0
+                if 0 <= x_line < w:
+                    cv2.line(debug_img, (x_line, 0), (x_line, h-1), color, 3)
+        
+        # Draw 20x20 marking boxes in green
+        for x, y in marking_boxes:
+            cv2.rectangle(debug_img, (x-10, y-10), (x+10, y+10), (0, 255, 0), 2)
+            cv2.circle(debug_img, (x, y), 3, (0, 255, 255), -1)  # Center point in yellow
+        
+        # Add text overlay with detection stats
+        cv2.putText(debug_img, f"Edges: {len(edge_lines)}, Markings: {len(marking_boxes)}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(debug_img, f"Edges: {len(edge_lines)}, Markings: {len(marking_boxes)}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 1, cv2.LINE_AA)
+        
+        cv2.imwrite(filename, debug_img)
+        if self.debug:
+            print(f"  Debug visualization saved: {filename}")
     
     def detect_whiteboard_edges_rpi5(self, image: np.ndarray, target_width: int = 320) -> Optional[Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]]:
         """RPi5-optimized version that processes at lower resolution for speed"""
