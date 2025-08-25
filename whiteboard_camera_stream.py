@@ -137,16 +137,8 @@ class WhiteboardCameraStream:
             # Configure the camera
             self.camera.configure(config)
             
-            # Use minimal controls with proper white balance for indoor lighting
-            controls = {
-                "AeEnable": True,       # Enable auto exposure
-                "AwbEnable": True,      # Enable auto white balance
-                "AwbMode": 2,          # Indoor lighting mode (0=auto, 1=incandescent, 2=fluorescent, 3=daylight, 4=cloudy, 5=shade)
-                "ColourGains": (1.4, 1.8),  # Manual color correction (Red, Blue) to counteract blue tint
-            }
-            
-            # Apply controls
-            self.camera.set_controls(controls)
+            # Use NO manual controls - let camera use defaults like camera_stream.py
+            # Don't set any controls at all - camera_stream.py doesn't set any either
             
             # Start the camera
             self.camera.start()
