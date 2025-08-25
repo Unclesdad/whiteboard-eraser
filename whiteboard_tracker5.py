@@ -146,23 +146,34 @@ class WhiteboardTracker5:
         return full_mask
     
     def detect_whiteboard_boundary_edges(self, image: np.ndarray, surface_mask: np.ndarray) -> np.ndarray:
-        """Detect edges specifically at whiteboard boundaries - optimized for RPi5"""
+        """Detect edges specifically where whiteboard surface terminates (not frame edges)"""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         
-        # Create boundary detection region - balanced approach
-        eroded = cv2.erode(surface_mask, self.kernel_5x5, iterations=1)
-        dilated = cv2.dilate(surface_mask, self.kernel_5x5, iterations=1)
-        boundary_region = cv2.subtract(dilated, eroded)
+        # NEW APPROACH: Find edges of the surface mask itself (where surface terminates)
+        # This detects surface boundaries, not general image edges that might be frame
         
-        # Use simple Gaussian blur instead of bilateral filter (much faster on RPi5)
+        # Apply slight blur to surface mask to smooth boundaries
+        surface_blurred = cv2.GaussianBlur(surface_mask.astype(np.float32), (3, 3), 1.0)
+        surface_blurred = (surface_blurred > 127).astype(np.uint8) * 255
+        
+        # Find edges of the surface mask (where whiteboard surface ends)
+        surface_edges = cv2.Canny(surface_blurred, 50, 150, apertureSize=3)
+        
+        # Create a narrow band around surface edges to validate against image content
+        dilated_surface_edges = cv2.dilate(surface_edges, self.kernel_3x3, iterations=2)
+        
+        # Also do traditional edge detection but only in the dilated surface edge region
         blurred = cv2.GaussianBlur(gray, (5, 5), 1.0)
+        image_edges = cv2.Canny(blurred, 30, 90, apertureSize=3)
         
-        # More sensitive Canny parameters to detect subtle edges
-        edges = cv2.Canny(blurred, 30, 90, apertureSize=3)
+        # Combine: Surface boundaries where there's also supporting image evidence
+        # This filters out noise while keeping real surface termination edges
+        boundary_edges = cv2.bitwise_and(surface_edges, dilated_surface_edges)
+        supporting_edges = cv2.bitwise_and(image_edges, dilated_surface_edges)
         
-        # Only keep edges that are at whiteboard boundaries
-        boundary_edges = cv2.bitwise_and(edges, boundary_region)
+        # Final edges: Surface boundaries with image support, or strong surface boundaries
+        boundary_edges = cv2.bitwise_or(boundary_edges, supporting_edges)
         
         # Focus on bottom portion where actual whiteboard edges should be
         # Zero out top 30% to avoid ceiling/wall edges
@@ -304,6 +315,41 @@ class WhiteboardTracker5:
         
         return filtered_edges
     
+    def is_surface_edge(self, rho: float, theta: float, h: int, w: int) -> bool:
+        """Determine if a line represents a surface edge vs a frame edge"""
+        angle_deg = np.degrees(theta)
+        a, b = np.cos(theta), np.sin(theta)
+        
+        # Surface edges should be at image boundaries or near them
+        # Frame edges are typically internal to the image
+        
+        if abs(b) > 0.001:  # Non-vertical line (horizontal-ish)
+            # For horizontal lines, check if they're in the lower portion
+            # Surface edges extend to bottom, frame edges are typically higher up
+            y_left = rho / b if abs(b) > 0.001 else 0
+            y_right = (rho - w * a) / b if abs(b) > 0.001 else 0
+            avg_y = (y_left + y_right) / 2
+            
+            # Surface edges should be in bottom 70% of image
+            # Frame edges are typically in middle region
+            if avg_y < h * 0.3:  # Too high up - likely frame edge
+                return False
+                
+        if abs(a) > 0.001:  # Non-horizontal line (vertical-ish)
+            # For vertical lines, check if they extend to image edges
+            x_pos = rho / a if abs(a) > 0.001 else 0
+            
+            # Surface edges should be near left or right boundaries
+            # Frame edges are typically more central
+            edge_margin = w * 0.15  # Within 15% of edges
+            is_near_left_edge = x_pos < edge_margin
+            is_near_right_edge = x_pos > (w - edge_margin)
+            
+            if not (is_near_left_edge or is_near_right_edge):
+                return False  # Too central - likely frame edge
+        
+        return True
+    
     def validate_line_geometry(self, rho: float, theta: float, h: int, w: int) -> bool:
         """Validate if a line makes geometric sense for a whiteboard boundary"""
         angle_deg = np.degrees(theta)
@@ -431,6 +477,12 @@ class WhiteboardTracker5:
                 if not self.validate_line_geometry(rho, theta, h, w):
                     if self.debug:
                         print(f"    Rejected (bad geometry): angle={angle_deg:.1f}°, rho={rho:.1f}")
+                    continue
+                
+                # Check if this is a surface edge vs frame edge
+                if not self.is_surface_edge(rho, theta, h, w):
+                    if self.debug:
+                        print(f"    Rejected (frame edge, not surface edge): angle={angle_deg:.1f}°, rho={rho:.1f}")
                     continue
                 
                 # Quick line quality check
