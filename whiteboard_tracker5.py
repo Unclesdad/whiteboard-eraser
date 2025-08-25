@@ -158,8 +158,8 @@ class WhiteboardTracker5:
         # Use simple Gaussian blur instead of bilateral filter (much faster on RPi5)
         blurred = cv2.GaussianBlur(gray, (5, 5), 1.0)
         
-        # More conservative Canny parameters for cleaner edges
-        edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+        # More sensitive Canny parameters to detect subtle edges
+        edges = cv2.Canny(blurred, 30, 90, apertureSize=3)
         
         # Only keep edges that are at whiteboard boundaries
         boundary_edges = cv2.bitwise_and(edges, boundary_region)
@@ -308,11 +308,11 @@ class WhiteboardTracker5:
         """Validate if a line makes geometric sense for a whiteboard boundary"""
         angle_deg = np.degrees(theta)
         
-        # Basic orientation check
+        # More permissive orientation check for subtle edges
         is_reasonable_angle = (
-            abs(angle_deg) < 30 or abs(angle_deg - 90) < 30 or  # Horizontal or vertical ±30°
-            abs(angle_deg - 180) < 30 or  # Horizontal wraparound
-            (30 < angle_deg < 60) or (120 < angle_deg < 150)  # Reasonable diagonals
+            abs(angle_deg) < 35 or abs(angle_deg - 90) < 35 or  # Horizontal or vertical ±35°
+            abs(angle_deg - 180) < 35 or  # Horizontal wraparound
+            (25 < angle_deg < 65) or (115 < angle_deg < 155)  # Reasonable diagonals
         )
         
         if not is_reasonable_angle:
@@ -399,9 +399,9 @@ class WhiteboardTracker5:
         if np.count_nonzero(edges) < 20:
             return []
         
-        # Adaptive Hough threshold based on available edge pixels
+        # More sensitive Hough threshold to catch weaker edges
         edge_pixel_count = np.count_nonzero(edges)
-        threshold = max(15, min(30, edge_pixel_count // 3))
+        threshold = max(10, min(20, edge_pixel_count // 5))
         
         lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=threshold)
         
@@ -436,8 +436,8 @@ class WhiteboardTracker5:
                 # Quick line quality check
                 support_score = self.score_line_fast(rho, theta, edges, h, w)
                 
-                # Lower support threshold for low contrast scenarios
-                min_support = 0.05 if self.is_low_contrast_scene else 0.1
+                # Lower support threshold to detect subtle edges
+                min_support = 0.03 if self.is_low_contrast_scene else 0.05
                 if support_score > min_support:
                     valid_lines.append((rho, theta, support_score))
                     if self.debug:
