@@ -137,14 +137,14 @@ class WhiteboardCameraStream:
             # Configure the camera
             self.camera.configure(config)
             
-            # Set camera controls for better whiteboard detection in low light
+            # Set camera controls for balanced whiteboard detection
             controls = {
-                "ExposureTime": 50000,  # 50ms exposure for brighter image
-                "AnalogueGain": 4.0,    # Higher gain for low light conditions
+                "ExposureTime": 20000,  # 20ms exposure - moderate brightness
+                "AnalogueGain": 2.0,    # Moderate gain to reduce noise
                 "AeEnable": True,       # Enable auto exposure
                 "AwbEnable": True,      # Enable auto white balance
-                "Brightness": 0.2,      # Increase brightness
-                "Contrast": 1.3,        # Increase contrast for better edge detection
+                "Brightness": 0.0,      # Reset brightness to neutral
+                "Contrast": 1.1,        # Slight contrast boost for edges
             }
             
             # Apply controls
