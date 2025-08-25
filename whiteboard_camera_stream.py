@@ -32,7 +32,10 @@ class WhiteboardCameraStream:
                  processing_width: int = 320,
                  capture_fps: int = 10,
                  processing_fps: int = 3,
-                 flask_port: int = 5000):
+                 flask_port: int = 5000,
+                 flip_horizontal: bool = False,
+                 flip_vertical: bool = False,
+                 rotate_180: bool = False):
         """
         Initialize the whiteboard camera stream
         
@@ -44,6 +47,9 @@ class WhiteboardCameraStream:
             capture_fps: Camera capture frame rate
             processing_fps: Whiteboard processing frame rate
             flask_port: Flask server port
+            flip_horizontal: Flip image horizontally (left-right mirror)
+            flip_vertical: Flip image vertically (up-down mirror)
+            rotate_180: Rotate image 180 degrees (equivalent to both flips)
         """
         self.camera_id = camera_id
         self.stream_width = stream_width
@@ -52,6 +58,11 @@ class WhiteboardCameraStream:
         self.capture_fps = capture_fps
         self.processing_fps = processing_fps
         self.flask_port = flask_port
+        
+        # Image flip/rotation options
+        self.flip_horizontal = flip_horizontal
+        self.flip_vertical = flip_vertical
+        self.rotate_180 = rotate_180
         
         # Calculate processing height maintaining aspect ratio
         self.processing_height = int(processing_width * stream_height / stream_width)
@@ -92,6 +103,25 @@ class WhiteboardCameraStream:
                 return s.getsockname()[0]
         except:
             return "localhost"
+    
+    def apply_image_transforms(self, frame: np.ndarray) -> np.ndarray:
+        """Apply flip/rotation transforms to frame based on initialization settings"""
+        if frame is None:
+            return frame
+            
+        transformed_frame = frame.copy()
+        
+        # Apply rotation first (180 degrees takes precedence over individual flips)
+        if self.rotate_180:
+            transformed_frame = cv2.rotate(transformed_frame, cv2.ROTATE_180)
+        else:
+            # Apply individual flips if not rotating 180
+            if self.flip_horizontal:
+                transformed_frame = cv2.flip(transformed_frame, 1)  # Flip horizontally
+            if self.flip_vertical:
+                transformed_frame = cv2.flip(transformed_frame, 0)  # Flip vertically
+        
+        return transformed_frame
     
     def init_camera(self) -> bool:
         """Initialize Pi Camera Module 3 using picamera2"""
@@ -238,6 +268,9 @@ class WhiteboardCameraStream:
         """Process frame with whiteboard detection and create debug visualization"""
         try:
             processing_start = time.time()
+            
+            # Apply image transformations (flip/rotate) before processing
+            frame = self.apply_image_transforms(frame)
             
             # Resize for processing if needed
             if frame.shape[1] != self.processing_width:
@@ -459,6 +492,12 @@ class WhiteboardCameraStream:
             <div>Processing Resolution: {{ processing_width }}x{{ processing_height }}</div>
             <div>Capture FPS: {{ capture_fps }}</div>
             <div>Processing FPS: {{ processing_fps }}</div>
+            <div style="margin-top: 10px; border-top: 1px solid #ddd; padding-top: 10px;">
+                <div><strong>Image Orientation:</strong></div>
+                <div>Flip Horizontal: {{ 'Yes' if flip_horizontal else 'No' }}</div>
+                <div>Flip Vertical: {{ 'Yes' if flip_vertical else 'No' }}</div>
+                <div>Rotate 180°: {{ 'Yes' if rotate_180 else 'No' }}</div>
+            </div>
         </div>
     </div>
     
@@ -481,7 +520,10 @@ class WhiteboardCameraStream:
                                         processing_width=self.processing_width,
                                         processing_height=self.processing_height,
                                         capture_fps=self.capture_fps,
-                                        processing_fps=self.processing_fps)
+                                        processing_fps=self.processing_fps,
+                                        flip_horizontal=self.flip_horizontal,
+                                        flip_vertical=self.flip_vertical,
+                                        rotate_180=self.rotate_180)
         
         @self.app.route('/video_feed')
         def video_feed():
@@ -595,7 +637,12 @@ def main():
         'processing_width': 320,        # Processing resolution (faster)
         'capture_fps': 10,              # Camera capture frame rate
         'processing_fps': 3,            # Whiteboard processing frame rate
-        'flask_port': 5000              # Web server port
+        'flask_port': 5000,             # Web server port
+        
+        # Image orientation options (uncomment and modify as needed)
+        'flip_horizontal': False,       # Mirror left-right (good for wall-mounted camera)
+        'flip_vertical': True,         # Mirror up-down (good for upside-down mount)
+        'rotate_180': False             # Rotate 180° (good for inverted mounting)
     }
     
     # Create and run stream
