@@ -76,12 +76,12 @@ class WhiteboardTracker5:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         
-        # Focus on bottom 80% where whiteboard surface appears (expanded coverage)
-        bottom_start = int(h * 0.2)  # Changed from 0.3 to 0.2 to cover more area
+        # Focus on bottom 60% where whiteboard surface appears (more focused)
+        bottom_start = int(h * 0.4)  # Changed to 0.4 to focus on bottom 60%
         bottom_region = gray[bottom_start:, :]
         
         if self.debug:
-            print(f"  Processing region: {w}x{h-bottom_start} (bottom 80%)")
+            print(f"  Processing region: {w}x{h-bottom_start} (bottom 60%)")
         
         # Use adaptive thresholding for better whiteboard detection
         # Whiteboard should be consistently bright
@@ -199,8 +199,8 @@ class WhiteboardTracker5:
             max_dimension = max(width, height)
             aspect_ratio = max_dimension / max(min_dimension, 1)
             
-            # More lenient position check (bottom 80% instead of 70%)
-            is_in_likely_region = y > h * 0.2
+            # More lenient position check (bottom 60% instead of 70%)
+            is_in_likely_region = y > h * 0.4
             
             # More lenient size check 
             is_reasonably_long = max_dimension > min(w, h) * 0.08  # Reduced from 0.1
@@ -256,7 +256,7 @@ class WhiteboardTracker5:
         boundary_edges = cv2.bitwise_and(combined_edges, boundary_region)
         
         # Focus on bottom region where whiteboard edges should be
-        boundary_edges[:int(h * 0.2), :] = 0
+        boundary_edges[:int(h * 0.4), :] = 0
         
         # Light morphological cleanup
         boundary_edges = cv2.morphologyEx(boundary_edges, cv2.MORPH_CLOSE, self.kernel_3x3)
@@ -327,14 +327,14 @@ class WhiteboardTracker5:
             y_left = rho / b
             y_right = (rho - w * a) / b
             
-            # Line should intersect image in reasonable region (bottom 80%)
+            # Line should intersect image in reasonable region (bottom 60%)
             # Check if ANY part of the line is in valid region
             min_y = min(y_left, y_right)
             max_y = max(y_left, y_right)
             
             # Line should pass through the image bounds and be in reasonable region
             line_in_image = (min_y <= h and max_y >= 0)
-            line_in_whiteboard_region = (max_y > h * 0.2)  # At least part in bottom 80%
+            line_in_whiteboard_region = (max_y > h * 0.4)  # At least part in bottom 60%
             
             if not (line_in_image and line_in_whiteboard_region):
                 return False
@@ -900,8 +900,8 @@ class WhiteboardTracker5:
         # Convert boolean mask to uint8 and apply to interior_mask
         interior_mask[is_below_all_edges] = 255
         
-        # Additional safety: zero out top 20% of image to prevent background detection
-        interior_mask[:int(h * 0.2), :] = 0
+        # Additional safety: zero out top 40% of image to focus on bottom 60%
+        interior_mask[:int(h * 0.4), :] = 0
         
         mask_time = time.time() - mask_start_time
         

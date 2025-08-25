@@ -138,8 +138,16 @@ class WhiteboardCameraStream:
             # Configure the camera
             self.camera.configure(config)
             
-            # Use NO manual controls - let camera use defaults like camera_stream.py
-            # Don't set any controls at all - camera_stream.py doesn't set any either
+            # Add minimal controls to improve edge detection
+            controls = {
+                "AeEnable": True,       # Enable auto exposure
+                "AwbEnable": True,      # Enable auto white balance
+                "Brightness": 0.05,     # Very small brightness boost
+                "Contrast": 1.05,       # Very small contrast boost
+            }
+            
+            # Apply controls
+            self.camera.set_controls(controls)
             
             # Start the camera
             self.camera.start()
