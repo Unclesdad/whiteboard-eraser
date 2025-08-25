@@ -129,22 +129,19 @@ class WhiteboardCameraStream:
             # Initialize Picamera2
             self.camera = Picamera2()
             
-            # Create configuration for still capture
-            config = self.camera.create_still_configuration(
+            # Create configuration for video streaming (like camera_stream.py)
+            config = self.camera.create_video_configuration(
                 main={"size": (self.stream_width, self.stream_height), "format": "RGB888"}
             )
             
             # Configure the camera
             self.camera.configure(config)
             
-            # Set camera controls for balanced whiteboard detection
+            # Use minimal controls - let camera auto-adjust like camera_stream.py
+            # Only set essential controls for whiteboard detection
             controls = {
-                "ExposureTime": 20000,  # 20ms exposure - moderate brightness
-                "AnalogueGain": 2.0,    # Moderate gain to reduce noise
                 "AeEnable": True,       # Enable auto exposure
                 "AwbEnable": True,      # Enable auto white balance
-                "Brightness": 0.0,      # Reset brightness to neutral
-                "Contrast": 1.1,        # Slight contrast boost for edges
             }
             
             # Apply controls
