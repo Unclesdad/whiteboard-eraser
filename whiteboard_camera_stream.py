@@ -137,12 +137,14 @@ class WhiteboardCameraStream:
             # Configure the camera
             self.camera.configure(config)
             
-            # Set camera controls for better whiteboard detection
+            # Set camera controls for better whiteboard detection in low light
             controls = {
-                "ExposureTime": 10000,  # 10ms exposure (adjust as needed)
-                "AnalogueGain": 1.0,    # Start with low gain
+                "ExposureTime": 50000,  # 50ms exposure for brighter image
+                "AnalogueGain": 4.0,    # Higher gain for low light conditions
                 "AeEnable": True,       # Enable auto exposure
                 "AwbEnable": True,      # Enable auto white balance
+                "Brightness": 0.2,      # Increase brightness
+                "Contrast": 1.3,        # Increase contrast for better edge detection
             }
             
             # Apply controls
@@ -641,8 +643,8 @@ def main():
         
         # Image orientation options (uncomment and modify as needed)
         'flip_horizontal': False,       # Mirror left-right (good for wall-mounted camera)
-        'flip_vertical': True,         # Mirror up-down (good for upside-down mount)
-        'rotate_180': False             # Rotate 180° (good for inverted mounting)
+        'flip_vertical': False,         # Mirror up-down (good for upside-down mount)
+        'rotate_180': True             # Rotate 180° (good for inverted mounting)
     }
     
     # Create and run stream
