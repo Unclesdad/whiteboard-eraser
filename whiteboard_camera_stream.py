@@ -10,7 +10,6 @@ import numpy as np
 import time
 import threading
 import socket
-from datetime import datetime
 from queue import Queue, Empty
 from typing import Optional, List, Tuple, Generator
 import signal
@@ -18,6 +17,9 @@ import sys
 
 # Flask imports
 from flask import Flask, Response, render_template_string
+
+# Pi Camera import
+from picamera2 import Picamera2
 
 # Import our whiteboard tracker
 from whiteboard_tracker5 import WhiteboardTracker5
@@ -92,43 +94,58 @@ class WhiteboardCameraStream:
             return "localhost"
     
     def init_camera(self) -> bool:
-        """Initialize Pi Camera Module 3"""
+        """Initialize Pi Camera Module 3 using picamera2"""
         try:
-            # Try different camera backends for Pi Camera
-            for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-                self.camera = cv2.VideoCapture(self.camera_id, backend)
-                if self.camera.isOpened():
-                    break
+            # Initialize Picamera2
+            self.camera = Picamera2()
             
-            if not self.camera.isOpened():
-                print(f"Error: Could not open camera {self.camera_id}")
-                return False
+            # Create configuration for still capture
+            config = self.camera.create_still_configuration(
+                main={"size": (self.stream_width, self.stream_height), "format": "RGB888"}
+            )
             
-            # Configure camera for Pi Camera Module 3
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.stream_width)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.stream_height)
-            self.camera.set(cv2.CAP_PROP_FPS, self.capture_fps)
-            self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
+            # Configure the camera
+            self.camera.configure(config)
             
-            # Auto settings for better whiteboard detection
-            self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Auto exposure
-            self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 1)      # Auto focus if available
+            # Set camera controls for better whiteboard detection
+            controls = {
+                "ExposureTime": 10000,  # 10ms exposure (adjust as needed)
+                "AnalogueGain": 1.0,    # Start with low gain
+                "AeEnable": True,       # Enable auto exposure
+                "AwbEnable": True,      # Enable auto white balance
+            }
+            
+            # Apply controls
+            self.camera.set_controls(controls)
+            
+            # Start the camera
+            self.camera.start()
+            
+            # Give camera time to stabilize
+            time.sleep(2)
             
             # Test capture
-            ret, test_frame = self.camera.read()
-            if not ret or test_frame is None:
-                print("Error: Could not capture test frame")
+            try:
+                test_frame_rgb = self.camera.capture_array()
+                if test_frame_rgb is None or test_frame_rgb.size == 0:
+                    print("Error: Could not capture test frame")
+                    return False
+                
+                # Convert to BGR for OpenCV compatibility
+                test_frame_bgr = cv2.cvtColor(test_frame_rgb, cv2.COLOR_RGB2BGR)
+                
+                actual_height, actual_width = test_frame_bgr.shape[:2]
+                print(f"Pi Camera Module 3 initialized: {actual_width}x{actual_height}")
+                print(f"Camera configuration successful")
+                return True
+                
+            except Exception as capture_error:
+                print(f"Test capture failed: {capture_error}")
                 return False
-            
-            actual_width = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_height = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            actual_fps = self.camera.get(cv2.CAP_PROP_FPS)
-            
-            print(f"Pi Camera initialized: {actual_width}x{actual_height} @ {actual_fps:.1f}FPS")
-            return True
             
         except Exception as e:
             print(f"Camera initialization error: {e}")
+            print("Make sure the camera is properly connected and enabled")
             return False
     
     def capture_loop(self):
@@ -140,13 +157,16 @@ class WhiteboardCameraStream:
             try:
                 start_time = time.time()
                 
-                ret, frame = self.camera.read()
-                if ret and frame is not None:
+                # Capture frame using picamera2
+                frame_rgb = self.camera.capture_array()
+                if frame_rgb is not None and frame_rgb.size > 0:
+                    # Convert RGB to BGR for OpenCV compatibility
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
                     timestamp = time.time()
                     
                     # Add to processing queue (non-blocking)
                     try:
-                        self.frame_queue.put((frame.copy(), timestamp), block=False)
+                        self.frame_queue.put((frame_bgr.copy(), timestamp), block=False)
                         self.stats['frames_captured'] += 1
                     except:
                         # Queue full, skip frame
@@ -528,9 +548,13 @@ class WhiteboardCameraStream:
         if self.processing_thread and self.processing_thread.is_alive():
             self.processing_thread.join(timeout=2)
         
-        # Release camera
+        # Stop and close camera
         if self.camera:
-            self.camera.release()
+            try:
+                self.camera.stop()
+                self.camera.close()
+            except Exception as e:
+                print(f"Camera cleanup error: {e}")
         
         self.print_stats()
         print("Camera stream stopped.")
