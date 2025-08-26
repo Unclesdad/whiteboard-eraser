@@ -70,70 +70,135 @@ class WhiteboardTracker5:
                   f"low_contrast={is_low_contrast}")
         
         return is_low_contrast
+    
+    def detect_camera_type_and_preprocess(self, image: np.ndarray) -> np.ndarray:
+        """Detect camera type and apply appropriate preprocessing"""
+        # Analyze image characteristics to detect camera type
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate image statistics
+        mean_brightness = np.mean(gray)
+        std_brightness = np.std(gray)
+        
+        # Check for Pi camera characteristics
+        # Pi camera tends to produce overexposed, low-contrast images
+        is_likely_pi_camera = (
+            mean_brightness > 180 or  # Overexposed
+            std_brightness < 25       # Low contrast
+        )
+        
+        if self.debug:
+            print(f"  Image analysis: mean_brightness={mean_brightness:.1f}, std={std_brightness:.1f}")
+            print(f"  Likely Pi camera: {is_likely_pi_camera}")
+        
+        if is_likely_pi_camera:
+            # Apply Pi camera specific preprocessing
+            processed_image = self.preprocess_pi_camera_image(image)
+        else:
+            # iPhone or other camera - minimal processing
+            processed_image = image.copy()
+        
+        return processed_image
+    
+    def preprocess_pi_camera_image(self, image: np.ndarray) -> np.ndarray:
+        """Apply preprocessing specifically for Pi Camera Module 3 images"""
+        if self.debug:
+            print("  Applying Pi camera preprocessing...")
+        
+        # Convert to LAB color space for better control
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # Method 1: Enhance contrast using CLAHE on L channel
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        l_enhanced = clahe.apply(l)
+        
+        # Method 2: Adjust gamma to reduce overexposure
+        # Gamma correction: lower gamma darkens the image
+        gamma = 0.7  # Darken overexposed areas
+        l_gamma = np.power(l_enhanced / 255.0, gamma) * 255.0
+        l_gamma = np.uint8(np.clip(l_gamma, 0, 255))
+        
+        # Method 3: Increase contrast by stretching histogram
+        # Find 5th and 95th percentiles to ignore outliers
+        p5, p95 = np.percentile(l_gamma, (5, 95))
+        if p95 > p5:  # Avoid division by zero
+            l_stretched = np.clip((l_gamma - p5) * 255 / (p95 - p5), 0, 255).astype(np.uint8)
+        else:
+            l_stretched = l_gamma
+        
+        # Recombine LAB channels
+        lab_enhanced = cv2.merge([l_stretched, a, b])
+        
+        # Convert back to BGR
+        enhanced_image = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+        
+        # Optional: Slight sharpening to enhance edge definition
+        kernel_sharpen = np.array([[-1,-1,-1],
+                                  [-1, 9,-1],
+                                  [-1,-1,-1]])
+        sharpened = cv2.filter2D(enhanced_image, -1, kernel_sharpen * 0.3)  # Mild sharpening
+        
+        return sharpened
         
     def find_whiteboard_surface_improved(self, image: np.ndarray) -> np.ndarray:
-        """Improved whiteboard surface detection focusing on actual whiteboard area"""
+        """Enhanced whiteboard surface detection with Pi camera support"""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         
-        # Focus on bottom 60% where whiteboard surface appears (more focused)
-        bottom_start = int(h * 0.4)  # Changed to 0.4 to focus on bottom 60%
+        # Focus on bottom 60% where whiteboard surface appears
+        bottom_start = int(h * 0.4)
         bottom_region = gray[bottom_start:, :]
         
         if self.debug:
             print(f"  Processing region: {w}x{h-bottom_start} (bottom 60%)")
         
-        # Use adaptive thresholding for better whiteboard detection
-        # Whiteboard should be consistently bright
-        p75 = np.percentile(bottom_region, 75)
-        p90 = np.percentile(bottom_region, 90)
+        # Adaptive approach based on image characteristics
+        mean_brightness = np.mean(bottom_region)
+        std_brightness = np.std(bottom_region)
         
-        # Use adaptive threshold - try strict first, then fallback to more lenient
-        strict_threshold = max(180, p90 * 0.9)
-        lenient_threshold = max(160, p75 * 0.8)
+        if self.debug:
+            print(f"  Region stats: mean={mean_brightness:.1f}, std={std_brightness:.1f}")
         
-        # Try strict threshold first
-        surface_mask = ((bottom_region > strict_threshold) * 255).astype(np.uint8)
+        # Method selection based on image characteristics
+        if mean_brightness > 200 and std_brightness < 20:
+            # Likely Pi camera - overexposed, low contrast
+            if self.debug:
+                print("  Using Pi camera detection method")
+            surface_mask = self.detect_surface_pi_camera(bottom_region)
+        elif std_brightness < 30:
+            # Low contrast case - use relative thresholding
+            if self.debug:
+                print("  Using low-contrast detection method")
+            surface_mask = self.detect_surface_low_contrast(bottom_region)
+        else:
+            # High contrast case - use standard detection
+            if self.debug:
+                print("  Using standard detection method")
+            surface_mask = self.detect_surface_standard(bottom_region)
         
-        # More aggressive cleanup to remove noise
-        surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_OPEN, self.kernel_3x3)
-        surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_CLOSE, self.kernel_5x5)
+        # Apply morphological operations based on detected surface quality
+        surface_area = np.count_nonzero(surface_mask)
+        region_area = bottom_region.shape[0] * bottom_region.shape[1]
+        surface_ratio = surface_area / region_area
         
-        # Keep only largest connected component that's reasonably sized
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(surface_mask, connectivity=8)
+        if surface_ratio < 0.05:
+            # Very small surface detected - likely noise, try alternative method
+            if self.debug:
+                print(f"  Small surface ({surface_ratio:.3f}), trying edge-based detection")
+            surface_mask = self.detect_surface_edge_based(bottom_region)
         
-        largest_area = 0
-        min_whiteboard_area = (h - bottom_start) * w * 0.1  # At least 10% of region
-        
-        if num_labels > 1:
-            # Find largest component that's also reasonably sized for a whiteboard
-            areas = stats[1:, cv2.CC_STAT_AREA]
-            largest_idx = np.argmax(areas) + 1
-            largest_area = areas[largest_idx - 1]
+        # Clean up the mask
+        if np.count_nonzero(surface_mask) > 0:
+            # Light morphological operations to preserve surface boundaries
+            surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_CLOSE, self.kernel_3x3)
             
-            if largest_area > min_whiteboard_area:
+            # Keep only largest connected component
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(surface_mask, connectivity=8)
+            if num_labels > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA]
+                largest_idx = np.argmax(areas) + 1
                 surface_mask = ((labels == largest_idx) * 255).astype(np.uint8)
-            else:
-                if self.debug:
-                    print(f"    Strict threshold failed: {largest_area} < {min_whiteboard_area}")
-                # Try lenient threshold as fallback
-                surface_mask = ((bottom_region > lenient_threshold) * 255).astype(np.uint8)
-                surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_CLOSE, self.kernel_5x5)
-                
-                num_labels2, labels2, stats2, _ = cv2.connectedComponentsWithStats(surface_mask, connectivity=8)
-                if num_labels2 > 1:
-                    areas2 = stats2[1:, cv2.CC_STAT_AREA]
-                    largest_idx2 = np.argmax(areas2) + 1
-                    largest_area = areas2[largest_idx2 - 1]
-                    
-                    if largest_area > min_whiteboard_area:
-                        surface_mask = ((labels2 == largest_idx2) * 255).astype(np.uint8)
-                        if self.debug:
-                            print(f"    Fallback threshold succeeded: {largest_area}")
-                    else:
-                        if self.debug:
-                            print(f"    Both thresholds failed: {largest_area}")
-                        return np.zeros_like(gray, dtype=np.uint8)
         
         # Create full-size mask
         full_mask = np.zeros_like(gray, dtype=np.uint8)
@@ -144,6 +209,74 @@ class WhiteboardTracker5:
             print(f"  Surface pixels: {surface_pixels} ({surface_pixels/(h*w)*100:.1f}% of image)")
         
         return full_mask
+    
+    def detect_surface_pi_camera(self, region: np.ndarray) -> np.ndarray:
+        """Surface detection optimized for Pi camera characteristics"""
+        # Pi camera images are often overexposed with poor contrast
+        # Use relative thresholding and look for the brightest, most uniform areas
+        
+        # Method 1: Use very conservative percentile thresholding
+        p60 = np.percentile(region, 60)
+        p80 = np.percentile(region, 80)
+        
+        # For Pi camera, even the 60th percentile might be whiteboard
+        mean_brightness = np.mean(region)
+        threshold = max(p60, mean_brightness * 0.95)  # Be very conservative
+        
+        surface_mask = ((region >= threshold) * 255).astype(np.uint8)
+        
+        # Method 2: If that fails, use gradient-based detection
+        if np.count_nonzero(surface_mask) < region.size * 0.05:
+            # Look for areas with low gradient (uniform regions)
+            grad_x = cv2.Sobel(region, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(region, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            
+            # Low gradient areas are likely uniform surface
+            grad_threshold = np.percentile(gradient_magnitude, 20)  # Bottom 20% of gradients
+            uniform_areas = gradient_magnitude < grad_threshold
+            
+            # Combine with brightness threshold
+            bright_areas = region > np.percentile(region, 70)
+            surface_mask = ((uniform_areas & bright_areas) * 255).astype(np.uint8)
+        
+        return surface_mask
+    
+    def detect_surface_low_contrast(self, region: np.ndarray) -> np.ndarray:
+        """Surface detection for low contrast images"""
+        # Use relative thresholding based on local statistics
+        p75 = np.percentile(region, 75)
+        p90 = np.percentile(region, 90)
+        
+        # More lenient thresholding for low contrast
+        threshold = max(p75, np.mean(region) + np.std(region) * 0.5)
+        surface_mask = ((region >= threshold) * 255).astype(np.uint8)
+        
+        return surface_mask
+    
+    def detect_surface_standard(self, region: np.ndarray) -> np.ndarray:
+        """Standard surface detection for good contrast images"""
+        # Original logic - strict thresholding
+        p90 = np.percentile(region, 90)
+        strict_threshold = max(180, p90 * 0.9)
+        
+        surface_mask = ((region > strict_threshold) * 255).astype(np.uint8)
+        return surface_mask
+    
+    def detect_surface_edge_based(self, region: np.ndarray) -> np.ndarray:
+        """Edge-based surface detection as fallback"""
+        # Use edge detection to find surface boundaries, then fill
+        edges = cv2.Canny(region, 30, 90)
+        
+        # Close edge gaps to create boundaries
+        edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, self.kernel_5x5)
+        
+        # Fill enclosed areas that are likely surface
+        # This is a simplified approach - could be enhanced with contour analysis
+        kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        filled = cv2.morphologyEx(edges_closed, cv2.MORPH_CLOSE, kernel_large)
+        
+        return filled
     
     def detect_whiteboard_boundary_edges(self, image: np.ndarray, surface_mask: np.ndarray) -> np.ndarray:
         """Detect edges specifically where whiteboard surface terminates (not frame edges)"""
@@ -786,23 +919,26 @@ class WhiteboardTracker5:
         start_time = time.time()
         
         try:
-            # Step 0: Analyze background contrast to choose appropriate method
-            self.is_low_contrast_scene = self.analyze_background_contrast(image)
+            # Step 0: Camera-specific preprocessing
+            processed_image = self.detect_camera_type_and_preprocess(image)
             
-            # Step 1: Improved surface detection
-            surface_mask = self.find_whiteboard_surface_improved(image)
+            # Step 1: Analyze background contrast to choose appropriate method
+            self.is_low_contrast_scene = self.analyze_background_contrast(processed_image)
+            
+            # Step 2: Improved surface detection with enhanced image
+            surface_mask = self.find_whiteboard_surface_improved(processed_image)
             
             if np.count_nonzero(surface_mask) < 1000:  # Higher threshold for better accuracy
                 if self.debug:
                     print("  Insufficient whiteboard surface area detected")
                 return None
             
-            # Step 2: Hybrid edge detection strategy - try standard first, then supplement if needed
+            # Step 3: Hybrid edge detection strategy - try standard first, then supplement if needed
             if self.debug:
                 print("  Trying standard edge detection first")
             
             # Always try standard detection first
-            edges = self.detect_whiteboard_boundary_edges(image, surface_mask)
+            edges = self.detect_whiteboard_boundary_edges(processed_image, surface_mask)
             edge_lines = self.find_whiteboard_lines(edges)
             
             # If insufficient lines found, supplement with gradient-based detection
@@ -811,7 +947,7 @@ class WhiteboardTracker5:
                     print(f"  Standard detection found {len(edge_lines)} lines, supplementing with gradient-based")
                 
                 # Try gradient-based detection 
-                gradient_edges = self.detect_edges_gradient_based(image, surface_mask)
+                gradient_edges = self.detect_edges_gradient_based(processed_image, surface_mask)
                 gradient_lines = self.find_whiteboard_lines(gradient_edges)
                 
                 # Combine results, avoiding duplicates
@@ -842,19 +978,19 @@ class WhiteboardTracker5:
                 if self.debug:
                     print(f"  Standard detection sufficient: {len(edge_lines)} lines")
             
-            # Step 3: Targeted right edge detection for wall scenarios
+            # Step 4: Targeted right edge detection for wall scenarios
             if len(edge_lines) == 1 and self.is_low_contrast_scene:
                 if self.debug:
                     print("  Attempting targeted right edge detection for wall scenario")
                 
-                right_edge = self.detect_right_edge_simple(image, surface_mask)
+                right_edge = self.detect_right_edge_simple(processed_image, surface_mask)
                 if right_edge is not None:
                     edge_lines.append(right_edge)
                     if self.debug:
                         print("  Added right edge candidate")
             
-            # Step 4: Improved marking detection with 20x20 boxes
-            marking_boxes = self.detect_markings_20x20(image, surface_mask, edge_lines)
+            # Step 5: Improved marking detection with 20x20 boxes
+            marking_boxes = self.detect_markings_20x20(processed_image, surface_mask, edge_lines)
             
             processing_time = time.time() - start_time
             self.processing_times.append(processing_time)
