@@ -651,11 +651,28 @@ class WhiteboardTracker5:
                                    abs(used_angle - angle + 180),
                                    abs(used_angle - angle - 180))
                     
-                    # Use smaller angle difference for low contrast to allow more diverse lines
-                    min_angle_diff = 15 if self.is_low_contrast_scene else 20
-                    if angle_diff <= min_angle_diff:
-                        is_different = False
-                        break
+                    # Special handling for whiteboard edges which can have opposite slopes
+                    # Convert angles to slope-based comparison to handle positive/negative slope pairs
+                    slope1 = np.tan(np.radians(used_angle)) if abs(used_angle - 90) > 5 else float('inf')
+                    slope2 = np.tan(np.radians(angle)) if abs(angle - 90) > 5 else float('inf')
+                    
+                    # For whiteboard edges, opposite slopes should be considered different
+                    # But similar slopes (within 8-10 degrees) should be considered same
+                    if abs(slope1) != float('inf') and abs(slope2) != float('inf'):
+                        # Both are non-vertical lines - check if they have clearly opposite slopes
+                        slopes_opposite = (slope1 > 0) != (slope2 > 0) and abs(slope1) > 0.1 and abs(slope2) > 0.1
+                        if slopes_opposite:
+                            # Keep lines with opposite slopes even if angles are similar
+                            pass
+                        elif angle_diff <= 8:  # Reduced threshold for diagonal edges
+                            is_different = False
+                            break
+                    else:
+                        # Standard angle-based comparison for vertical/near-vertical lines
+                        min_angle_diff = 8 if self.is_low_contrast_scene else 10
+                        if angle_diff <= min_angle_diff:
+                            is_different = False
+                            break
                 
                 if is_different:
                     final_lines.append((rho, theta))
