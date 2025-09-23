@@ -83,9 +83,16 @@ class MarkingDetector:
         fov_half_vertical = self.fov_vertical_rad / 2
 
         # Distance from directly below camera to far edge of view
-        far_distance = self.camera_height_mm / np.tan(self.camera_angle_rad - fov_half_vertical)
+        angle_far = self.camera_angle_rad - fov_half_vertical
+        if abs(angle_far) < 0.01:  # Avoid divide by zero
+            angle_far = 0.01
+        far_distance = self.camera_height_mm / np.tan(angle_far)
+
         # Distance from directly below camera to near edge of view
-        near_distance = self.camera_height_mm / np.tan(self.camera_angle_rad + fov_half_vertical)
+        angle_near = self.camera_angle_rad + fov_half_vertical
+        if abs(angle_near) < 0.01:  # Avoid divide by zero
+            angle_near = 0.01
+        near_distance = self.camera_height_mm / np.tan(angle_near)
 
         # Total vertical coverage
         total_vertical_mm = far_distance - near_distance

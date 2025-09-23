@@ -63,7 +63,23 @@ fi
 
 # Install Python dependencies
 echo "Installing Python dependencies..."
-sudo -u "$REAL_USER" pip3 install -r "$INSTALL_DIR/requirements.txt"
+
+# Try different pip commands in order of preference
+if command -v pip3 >/dev/null 2>&1; then
+    echo "Using pip3..."
+    sudo -u "$REAL_USER" pip3 install -r "$INSTALL_DIR/requirements.txt"
+elif command -v pip >/dev/null 2>&1; then
+    echo "Using pip..."
+    sudo -u "$REAL_USER" pip install -r "$INSTALL_DIR/requirements.txt"
+elif command -v python3 -m pip >/dev/null 2>&1; then
+    echo "Using python3 -m pip..."
+    sudo -u "$REAL_USER" python3 -m pip install -r "$INSTALL_DIR/requirements.txt"
+else
+    echo "⚠️  No pip command found. Please install manually:"
+    echo "    python3 -m pip install -r $INSTALL_DIR/requirements.txt"
+    echo "Or install pip first:"
+    echo "    sudo apt update && sudo apt install python3-pip"
+fi
 
 # Make Python files executable
 chmod +x "$INSTALL_DIR"/*.py
