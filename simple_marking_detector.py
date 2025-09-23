@@ -166,6 +166,11 @@ class SimpleMarkingDetector:
         # Correct camera orientation
         corrected = self.rotate_image_180(image)
 
+        # Debug: Print actual image dimensions being processed
+        if self.debug:
+            height, width = corrected.shape[:2]
+            print(f"  Processing frame: {width}x{height}")
+
         # Find white surface directly from color image
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
