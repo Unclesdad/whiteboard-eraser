@@ -59,9 +59,17 @@ class MarkingDetector:
         self.marking_threshold = 80  # Darkness threshold for markings
         self.gaussian_blur_size = 3  # Small blur for noise reduction
 
+        # Whiteboard surface detection parameters
+        self.whiteboard_brightness_threshold = 180  # Minimum brightness for whiteboard surface
+        self.whiteboard_area_threshold = 1000  # Minimum whiteboard area in pixels
+        self.edge_exclusion_pixels = 15  # Exclude detections within this distance from whiteboard edges
+        self.contrast_threshold = 40  # Minimum local contrast against white background
+
         # Morphological operations kernels
         self.erode_kernel = np.ones((2, 2), np.uint8)
         self.dilate_kernel = np.ones((3, 3), np.uint8)
+        self.whiteboard_erode_kernel = np.ones((3, 3), np.uint8)
+        self.whiteboard_dilate_kernel = np.ones((5, 5), np.uint8)
 
         # Performance tracking
         self.processing_times = []
@@ -137,24 +145,135 @@ class MarkingDetector:
 
         return blurred
 
+    def _detect_whiteboard_surface(self, gray_image: np.ndarray) -> np.ndarray:
+        """
+        Detect whiteboard surface area to focus marking detection
+
+        Args:
+            gray_image: Preprocessed grayscale image
+
+        Returns:
+            Binary mask where white pixels represent whiteboard surface
+        """
+        # Find bright areas (potential whiteboard surface)
+        _, bright_mask = cv2.threshold(gray_image, self.whiteboard_brightness_threshold, 255, cv2.THRESH_BINARY)
+
+        # Clean up the mask with morphological operations
+        # Remove small noise
+        cleaned = cv2.erode(bright_mask, self.whiteboard_erode_kernel, iterations=1)
+        # Fill in small gaps
+        cleaned = cv2.dilate(cleaned, self.whiteboard_dilate_kernel, iterations=2)
+        # Smooth edges
+        cleaned = cv2.erode(cleaned, self.whiteboard_erode_kernel, iterations=1)
+
+        # Find the largest bright region (main whiteboard surface)
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            # If no whiteboard detected, use whole image (fallback)
+            return np.ones_like(gray_image, dtype=np.uint8) * 255
+
+        # Find largest contour that meets minimum area requirement
+        largest_contour = None
+        largest_area = 0
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > self.whiteboard_area_threshold and area > largest_area:
+                largest_area = area
+                largest_contour = contour
+
+        if largest_contour is None:
+            # No suitable whiteboard found, use whole image (fallback)
+            return np.ones_like(gray_image, dtype=np.uint8) * 255
+
+        # Create mask for the whiteboard surface
+        whiteboard_mask = np.zeros_like(gray_image, dtype=np.uint8)
+        cv2.fillPoly(whiteboard_mask, [largest_contour], 255)
+
+        # Erode the mask to exclude edges (where false detections often occur)
+        edge_exclusion_kernel = np.ones((self.edge_exclusion_pixels, self.edge_exclusion_pixels), np.uint8)
+        whiteboard_mask = cv2.erode(whiteboard_mask, edge_exclusion_kernel, iterations=1)
+
+        return whiteboard_mask
+
+    def _calculate_local_contrast(self, gray_image: np.ndarray, x: int, y: int, w: int, h: int) -> float:
+        """
+        Calculate local contrast around a detection to ensure it's actually a marking on white surface
+
+        Args:
+            gray_image: Grayscale image
+            x, y, w, h: Bounding box of the detection
+
+        Returns:
+            Local contrast value (higher = better marking candidate)
+        """
+        # Expand region to get surrounding context
+        pad = 10
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(gray_image.shape[1], x + w + pad)
+        y2 = min(gray_image.shape[0], y + h + pad)
+
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+
+        # Get the region around the detection
+        region = gray_image[y1:y2, x1:x2]
+
+        # Get the actual detection area
+        det_x1 = x - x1
+        det_y1 = y - y1
+        det_x2 = det_x1 + w
+        det_y2 = det_y1 + h
+
+        if det_x2 <= det_x1 or det_y2 <= det_y1:
+            return 0.0
+
+        detection_area = region[det_y1:det_y2, det_x1:det_x2]
+
+        # Calculate average brightness of detection vs surrounding area
+        if detection_area.size == 0:
+            return 0.0
+
+        detection_brightness = np.mean(detection_area)
+
+        # Create mask for surrounding area (exclude the detection itself)
+        surrounding_mask = np.ones_like(region, dtype=bool)
+        surrounding_mask[det_y1:det_y2, det_x1:det_x2] = False
+
+        if np.sum(surrounding_mask) == 0:
+            return 0.0
+
+        surrounding_brightness = np.mean(region[surrounding_mask])
+
+        # Calculate contrast (surrounding should be brighter than detection for markings on white)
+        contrast = surrounding_brightness - detection_brightness
+        return max(0.0, contrast)
+
     def detect_markings(self, image: np.ndarray) -> List[Marking]:
         """
-        Detect dark markings on white background
+        Detect dark markings on white background using two-stage approach
 
         Args:
             image: Input BGR image from camera
 
         Returns:
-            List of detected markings
+            List of detected markings on whiteboard surface
         """
         start_time = time.time()
 
-        # Preprocess image
+        # Stage 1: Preprocess image and detect whiteboard surface
         gray = self.preprocess_image(image)
+        whiteboard_mask = self._detect_whiteboard_surface(gray)
 
+        # Stage 2: Detect markings only within whiteboard area
         # Create binary mask for dark markings
         # Invert so markings become white on black background
         _, binary = cv2.threshold(gray, self.marking_threshold, 255, cv2.THRESH_BINARY_INV)
+
+        # Apply whiteboard mask - only look for markings on whiteboard surface
+        binary = cv2.bitwise_and(binary, whiteboard_mask)
 
         # Clean up with morphological operations
         cleaned = cv2.erode(binary, self.erode_kernel, iterations=1)
@@ -172,12 +291,19 @@ class MarkingDetector:
                 # Get bounding box
                 x, y, w, h = cv2.boundingRect(contour)
 
+                # Calculate local contrast to ensure it's actually a marking on white surface
+                local_contrast = self._calculate_local_contrast(gray, x, y, w, h)
+
+                # Skip if contrast is too low (not a real marking on white surface)
+                if local_contrast < self.contrast_threshold:
+                    continue
+
                 # Calculate center
                 center_x = x + w / 2
                 center_y = y + h / 2
 
-                # Calculate confidence based on area and shape
-                confidence = self._calculate_confidence(contour, area)
+                # Calculate enhanced confidence with whiteboard context
+                confidence = self._calculate_confidence_with_context(contour, area, local_contrast, whiteboard_mask, x, y, w, h)
 
                 marking = Marking(
                     x=center_x,
@@ -201,7 +327,7 @@ class MarkingDetector:
         return markings
 
     def _calculate_confidence(self, contour: np.ndarray, area: float) -> float:
-        """Calculate confidence score for a detected marking"""
+        """Calculate confidence score for a detected marking (legacy method)"""
         # Base confidence on area (prefer medium-sized markings)
         ideal_area = (self.min_marking_area + self.max_marking_area) / 2
         area_score = 1.0 - abs(area - ideal_area) / ideal_area
@@ -217,6 +343,67 @@ class MarkingDetector:
         # Combine scores
         confidence = (area_score * 0.7 + shape_score * 0.3)
         return max(0.0, min(1.0, confidence))
+
+    def _calculate_confidence_with_context(self, contour: np.ndarray, area: float, local_contrast: float,
+                                         whiteboard_mask: np.ndarray, x: int, y: int, w: int, h: int) -> float:
+        """
+        Calculate enhanced confidence score considering whiteboard context
+
+        Args:
+            contour: Detection contour
+            area: Detection area in pixels
+            local_contrast: Local contrast value
+            whiteboard_mask: Whiteboard surface mask
+            x, y, w, h: Bounding box coordinates
+
+        Returns:
+            Enhanced confidence score (0.0 to 1.0)
+        """
+        # Start with basic shape and area confidence
+        base_confidence = self._calculate_confidence(contour, area)
+
+        # Contrast score (normalize to 0-1, with optimal contrast around 60-80)
+        optimal_contrast = 70.0
+        contrast_score = 1.0 - abs(local_contrast - optimal_contrast) / optimal_contrast
+        contrast_score = max(0.0, min(1.0, contrast_score))
+
+        # Distance from whiteboard edge score
+        # Check how far the detection is from the edge of the whiteboard mask
+        center_x = x + w // 2
+        center_y = y + h // 2
+
+        # Create a kernel to check distance from edges
+        distance_kernel = np.ones((self.edge_exclusion_pixels * 2, self.edge_exclusion_pixels * 2), np.uint8)
+        eroded_mask = cv2.erode(whiteboard_mask, distance_kernel, iterations=1)
+
+        edge_distance_score = 1.0
+        if center_y < whiteboard_mask.shape[0] and center_x < whiteboard_mask.shape[1]:
+            if eroded_mask[center_y, center_x] == 0:
+                # Too close to edge, reduce confidence
+                edge_distance_score = 0.3
+            elif whiteboard_mask[center_y, center_x] == 0:
+                # Outside whiteboard entirely
+                edge_distance_score = 0.0
+
+        # Size consistency score (markings should be reasonably sized relative to image)
+        image_area = whiteboard_mask.shape[0] * whiteboard_mask.shape[1]
+        relative_size = area / image_area
+        if relative_size > 0.01:  # Too large (more than 1% of image)
+            size_consistency_score = 0.2
+        elif relative_size < 0.0001:  # Too small
+            size_consistency_score = 0.5
+        else:
+            size_consistency_score = 1.0
+
+        # Combine all scores with weights
+        enhanced_confidence = (
+            base_confidence * 0.3 +           # Basic shape/area
+            contrast_score * 0.4 +            # Local contrast (most important)
+            edge_distance_score * 0.2 +       # Distance from whiteboard edges
+            size_consistency_score * 0.1      # Size reasonableness
+        )
+
+        return max(0.0, min(1.0, enhanced_confidence))
 
     def pixel_to_camera_relative_mm(self, pixel_x: float, pixel_y: float) -> Tuple[float, float]:
         """
