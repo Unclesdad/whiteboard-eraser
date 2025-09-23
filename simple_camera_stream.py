@@ -26,33 +26,37 @@ PAGE = """\
 <style>
 body { font-family: Arial, sans-serif; background-color: #f0f0f0; }
 .container { text-align: center; margin: 20px; }
-.stats { background-color: white; padding: 10px; margin: 10px auto; border-radius: 5px; width: 1300px; }
-.video-container { display: flex; justify-content: center; gap: 20px; margin: 20px 0; }
+.stats { background-color: white; padding: 10px; margin: 10px auto; border-radius: 5px; width: 1950px; }
+.video-container { display: flex; justify-content: center; gap: 15px; margin: 20px 0; }
 .video { border: 2px solid #333; border-radius: 5px; }
 .video-label { text-align: center; margin-top: 10px; font-weight: bold; }
 </style>
 </head>
 <body>
 <div class="container">
-<h1>Simple Whiteboard Detection Test</h1>
+<h1>Simple Whiteboard Detection Test - Three Panel View</h1>
 <div class="stats">
-<p><strong>Approach:</strong> Find whiteboard top edge, detect markings below it</p>
+<p><strong>Approach:</strong> Brightness threshold → Find bottom blob → Detect dark spots</p>
 <p><strong>Markings:</strong> <span id="markings">0</span> | <strong>FPS:</strong> <span id="fps">0.0</span></p>
 </div>
 <div class="video-container">
 <div>
 <img src="stream.mjpg" width="640" height="480" class="video">
-<div class="video-label">Annotated Camera Feed</div>
+<div class="video-label">1. Annotated Camera Feed</div>
 </div>
 <div>
-<img src="mask.mjpg" width="640" height="480" class="video">
-<div class="video-label">Whiteboard Surface Mask</div>
+<img src="brightness.mjpg" width="640" height="480" class="video">
+<div class="video-label">2. Raw Brightness Mask</div>
+</div>
+<div>
+<img src="surface.mjpg" width="640" height="480" class="video">
+<div class="video-label">3. Final Surface Blob</div>
 </div>
 </div>
 <div class="stats">
-<p><strong>Left:</strong> Yellow line = whiteboard edge, Colored boxes = detected markings</p>
-<p><strong>Right:</strong> White = whiteboard surface area, Black = excluded area</p>
-<p><strong>Colors:</strong> Green=high confidence, Yellow=medium, Orange=low confidence</p>
+<p><strong>Panel 1:</strong> Yellow boundary = detected surface, Colored boxes = markings</p>
+<p><strong>Panel 2:</strong> Raw brightness thresholding (all pixels above threshold)</p>
+<p><strong>Panel 3:</strong> Bottom-connected blob selected as whiteboard surface</p>
 </div>
 </div>
 <script>
@@ -73,10 +77,12 @@ setInterval(function() {
 class SimpleDetectionOutput(io.BufferedIOBase):
     def __init__(self):
         self.frame = None
-        self.mask_frame = None
+        self.brightness_frame = None
+        self.surface_frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
-        self.mask_condition = Condition()
+        self.brightness_condition = Condition()
+        self.surface_condition = Condition()
 
         # Simple detection system
         self.detector = SimpleMarkingDetector(debug=True)
@@ -134,21 +140,29 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                 # Create annotated frame
                 annotated_frame = self.detector.visualize_detections(frame, markings)
 
-                # Create mask visualization
-                mask_frame = self._create_mask_visualization(frame)
+                # Create brightness mask visualization
+                brightness_frame = self._create_brightness_visualization(frame)
 
-                # Convert both to JPEG
+                # Create final surface visualization
+                surface_frame = self._create_surface_visualization(frame)
+
+                # Convert all three to JPEG
                 _, jpeg_data = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                _, mask_jpeg_data = cv2.imencode('.jpg', mask_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                _, brightness_jpeg_data = cv2.imencode('.jpg', brightness_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                _, surface_jpeg_data = cv2.imencode('.jpg', surface_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
                 # Update streaming buffers
                 with self.condition:
                     self.frame = jpeg_data.tobytes()
                     self.condition.notify_all()
 
-                with self.mask_condition:
-                    self.mask_frame = mask_jpeg_data.tobytes()
-                    self.mask_condition.notify_all()
+                with self.brightness_condition:
+                    self.brightness_frame = brightness_jpeg_data.tobytes()
+                    self.brightness_condition.notify_all()
+
+                with self.surface_condition:
+                    self.surface_frame = surface_jpeg_data.tobytes()
+                    self.surface_condition.notify_all()
 
                 # Small delay
                 time.sleep(0.05)
@@ -157,33 +171,57 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                 print(f"Simple detection error: {e}")
                 time.sleep(0.1)
 
-    def _create_mask_visualization(self, frame):
-        """Create a visualization of the white surface mask"""
+    def _create_brightness_visualization(self, frame):
+        """Create visualization of raw brightness thresholding"""
         # Correct camera orientation
         corrected = self.detector.rotate_image_180(frame.copy())
 
-        # Get the white surface mask using the new detector method
-        white_mask = self.detector.find_white_surface(corrected)
+        # Get raw brightness mask (replicate the detector's logic)
+        gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+        brightness_threshold = 180
+        _, brightness_mask = cv2.threshold(gray, brightness_threshold, 255, cv2.THRESH_BINARY)
 
         # Convert mask to 3-channel for display
-        mask_vis = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
-
-        # Draw boundary of detected white surface
-        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            cv2.drawContours(mask_vis, [largest_contour], -1, (0, 255, 255), 2)
+        brightness_vis = cv2.cvtColor(brightness_mask, cv2.COLOR_GRAY2BGR)
 
         # Add text info
-        white_area = np.sum(white_mask) / 255.0
-        cv2.putText(mask_vis, f"White Surface: {white_area:.0f}px", (10, 30),
+        white_pixels = np.sum(brightness_mask) / 255.0
+        cv2.putText(brightness_vis, f"Threshold: {brightness_threshold}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(mask_vis, "White = Drawing Surface", (10, 60),
+        cv2.putText(brightness_vis, f"White pixels: {white_pixels:.0f}", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(mask_vis, "Black = Excluded", (10, 90),
+        cv2.putText(brightness_vis, "Raw brightness mask", (10, 90),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
 
-        return mask_vis
+        return brightness_vis
+
+    def _create_surface_visualization(self, frame):
+        """Create visualization of final detected surface blob"""
+        # Correct camera orientation
+        corrected = self.detector.rotate_image_180(frame.copy())
+
+        # Get the final surface mask
+        surface_mask = self.detector.find_white_surface(corrected)
+
+        # Convert mask to 3-channel for display
+        surface_vis = cv2.cvtColor(surface_mask, cv2.COLOR_GRAY2BGR)
+
+        # Draw boundary of detected surface
+        contours, _ = cv2.findContours(surface_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            cv2.drawContours(surface_vis, [largest_contour], -1, (0, 255, 255), 2)
+
+        # Add text info
+        surface_area = np.sum(surface_mask) / 255.0
+        cv2.putText(surface_vis, f"Surface: {surface_area:.0f}px", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(surface_vis, "Bottom-connected blob", (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(surface_vis, "Final surface mask", (10, 90),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
+
+        return surface_vis
 
     def write(self, buf):
         """Handle incoming camera data"""
@@ -251,7 +289,7 @@ class SimpleStreamingHandler(server.BaseHTTPRequestHandler):
                         self.wfile.write(b'\r\n')
             except Exception as e:
                 print(f'Removed streaming client {self.client_address}: {e}')
-        elif self.path == '/mask.mjpg':
+        elif self.path == '/brightness.mjpg':
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -260,9 +298,9 @@ class SimpleStreamingHandler(server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
-                    with output.mask_condition:
-                        output.mask_condition.wait()
-                        frame = output.mask_frame
+                    with output.brightness_condition:
+                        output.brightness_condition.wait()
+                        frame = output.brightness_frame
                     if frame:
                         self.wfile.write(b'--FRAME\r\n')
                         self.send_header('Content-Type', 'image/jpeg')
@@ -271,7 +309,28 @@ class SimpleStreamingHandler(server.BaseHTTPRequestHandler):
                         self.wfile.write(frame)
                         self.wfile.write(b'\r\n')
             except Exception as e:
-                print(f'Removed mask streaming client {self.client_address}: {e}')
+                print(f'Removed brightness streaming client {self.client_address}: {e}')
+        elif self.path == '/surface.mjpg':
+            self.send_response(200)
+            self.send_header('Age', 0)
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
+            self.end_headers()
+            try:
+                while True:
+                    with output.surface_condition:
+                        output.surface_condition.wait()
+                        frame = output.surface_frame
+                    if frame:
+                        self.wfile.write(b'--FRAME\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', len(frame))
+                        self.end_headers()
+                        self.wfile.write(frame)
+                        self.wfile.write(b'\r\n')
+            except Exception as e:
+                print(f'Removed surface streaming client {self.client_address}: {e}')
         else:
             self.send_error(404)
             self.end_headers()

@@ -43,9 +43,9 @@ class SimpleMarkingDetector:
         self.debug = debug
 
         # Simple detection parameters
-        self.min_marking_area = 10  # Very permissive for small pen marks
+        self.min_marking_area = 8   # Very permissive for small pen marks
         self.max_marking_area = 1000
-        self.marking_threshold = 75  # Lower threshold to catch lighter pen marks
+        self.marking_threshold = 70  # Lower threshold to catch pen marks on white surface
         self.gaussian_blur_size = 3
 
         # Whiteboard detection - much simpler
@@ -98,49 +98,58 @@ class SimpleMarkingDetector:
 
     def find_white_surface(self, image: np.ndarray) -> np.ndarray:
         """
-        Find the whiteboard surface using bottom-up detection
-        Camera is ON the whiteboard, so surface appears at bottom of frame
+        Find the whiteboard surface using simple brightness thresholding
+        1. Create white mask from brightness
+        2. Find blob that touches bottom edge
+        3. Return that blob as surface
 
         Returns:
             Binary mask where white pixels represent the whiteboard surface
         """
         height, width = image.shape[:2]
 
-        # Convert to HSV for better white detection
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # More restrictive white detection - only very white areas
-        lower_white = np.array([0, 0, 210])      # Very high brightness
-        upper_white = np.array([179, 20, 255])   # Very low saturation
+        # Simple brightness thresholding - pixels above threshold = white
+        brightness_threshold = 180  # Adjust this value as needed
+        _, white_mask = cv2.threshold(gray, brightness_threshold, 255, cv2.THRESH_BINARY)
 
-        # Create initial white mask
-        white_mask = cv2.inRange(hsv, lower_white, upper_white)
+        # Clean up the mask slightly
+        kernel = np.ones((3, 3), np.uint8)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
 
-        # Start from bottom edge and scan upward to find whiteboard surface
+        # Find connected components
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(white_mask, connectivity=8)
+
+        # Find the component that touches the bottom edge
+        bottom_row = height - 1
         surface_mask = np.zeros_like(white_mask, dtype=np.uint8)
 
-        # For each column, find how far up the white surface extends from bottom
-        for x in range(width):
-            # Start from bottom row and go up
-            for y in range(height - 1, -1, -1):
-                if white_mask[y, x] > 0:
-                    # Found white pixel - mark it as part of surface
-                    surface_mask[y, x] = 255
-                else:
-                    # Hit non-white area - stop scanning up this column
-                    break
+        best_component = None
+        best_area = 0
 
-        # Clean up the surface mask slightly
-        kernel = np.ones((3, 3), np.uint8)
-        surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_CLOSE, kernel)
+        for label in range(1, num_labels):  # Skip background (label 0)
+            # Check if this component touches the bottom edge
+            component_mask = (labels == label).astype(np.uint8) * 255
 
-        # Ensure the surface connects to the bottom edge
-        # Fill any small gaps near the bottom
-        bottom_rows = 20  # Look at bottom 20 pixels
-        for y in range(height - bottom_rows, height):
-            for x in range(width):
-                if white_mask[y, x] > 0:
-                    surface_mask[y, x] = 255
+            # Check if any pixels in bottom row belong to this component
+            if np.any(component_mask[bottom_row, :] > 0):
+                area = stats[label, cv2.CC_STAT_AREA]
+
+                # Find the largest component that touches bottom
+                if area > best_area and area > self.whiteboard_area_threshold:
+                    best_area = area
+                    best_component = label
+
+        # Use the best component as our surface
+        if best_component is not None:
+            surface_mask = (labels == best_component).astype(np.uint8) * 255
+        else:
+            # Fallback: use bottom portion of image
+            print(f"  No bottom-connected blob found, using fallback")
+            fallback_start = int(height * 0.5)
+            surface_mask[fallback_start:, :] = 255
 
         return surface_mask
 
