@@ -158,33 +158,27 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                 time.sleep(0.1)
 
     def _create_mask_visualization(self, frame):
-        """Create a visualization of the whiteboard surface mask"""
+        """Create a visualization of the white surface mask"""
         # Correct camera orientation
         corrected = self.detector.rotate_image_180(frame.copy())
 
-        # Convert to grayscale
-        gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
-
-        # Get the mask using the same logic as the detector
-        whiteboard_top = self.detector.find_whiteboard_top_edge(gray)
-
-        # Create mask
-        mask = np.zeros_like(gray, dtype=np.uint8)
-        padding = 20
-        start_y = max(0, whiteboard_top - padding)
-        mask[start_y:, :] = 255
+        # Get the white surface mask using the new detector method
+        white_mask = self.detector.find_white_surface(corrected)
 
         # Convert mask to 3-channel for display
-        mask_vis = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        mask_vis = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
 
-        # Add the whiteboard edge line
-        if whiteboard_top > 0:
-            cv2.line(mask_vis, (0, whiteboard_top), (mask_vis.shape[1], whiteboard_top), (0, 255, 255), 2)
+        # Draw boundary of detected white surface
+        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            cv2.drawContours(mask_vis, [largest_contour], -1, (0, 255, 255), 2)
 
         # Add text info
-        cv2.putText(mask_vis, f"Whiteboard Top: y={whiteboard_top}", (10, 30),
+        white_area = np.sum(white_mask) / 255.0
+        cv2.putText(mask_vis, f"White Surface: {white_area:.0f}px", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(mask_vis, "White = Search Area", (10, 60),
+        cv2.putText(mask_vis, "White = Drawing Surface", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(mask_vis, "Black = Excluded", (10, 90),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)

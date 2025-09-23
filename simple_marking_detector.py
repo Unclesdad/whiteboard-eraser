@@ -60,7 +60,7 @@ class SimpleMarkingDetector:
         self.processing_times = []
 
         # Debug info
-        self.last_whiteboard_top = None
+        self.last_whiteboard_mask = None
 
         # Calculate pixel-to-mm conversion factors
         self._calculate_pixel_to_mm_factors()
@@ -95,75 +95,79 @@ class SimpleMarkingDetector:
         """Rotate image 180 degrees to correct upside-down camera mounting"""
         return cv2.rotate(image, cv2.ROTATE_180)
 
-    def find_whiteboard_top_edge(self, gray_image: np.ndarray) -> int:
+    def find_white_surface(self, image: np.ndarray) -> np.ndarray:
         """
-        Find the top edge of the whiteboard using simple approach
+        Find the white drawing surface using color-based detection
 
         Returns:
-            Y coordinate of whiteboard top edge, or 0 if not found
+            Binary mask where white pixels represent the drawing surface
         """
-        # Look for horizontal transition from dark (floor/wall) to bright (whiteboard)
-        # Search only in top portion of image
-        search_height = min(self.top_edge_search_height, gray_image.shape[0] // 2)
+        # Convert to HSV for better white detection
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        # Calculate horizontal brightness profile
-        brightness_profile = []
-        for y in range(search_height):
-            row_brightness = np.mean(gray_image[y, :])
-            brightness_profile.append(row_brightness)
+        # Define range for white/light colors
+        # HSV ranges: H(0-179), S(0-255), V(0-255)
+        lower_white = np.array([0, 0, 180])      # Low saturation, high value
+        upper_white = np.array([179, 30, 255])   # Any hue, low saturation, high value
 
-        # Find the largest jump in brightness (floor -> whiteboard transition)
-        max_jump = 0
-        best_edge_y = 0
+        # Create mask for white areas
+        white_mask = cv2.inRange(hsv, lower_white, upper_white)
 
-        for y in range(10, len(brightness_profile) - 10):
-            # Compare average brightness before and after this point
-            before_avg = np.mean(brightness_profile[max(0, y-10):y])
-            after_avg = np.mean(brightness_profile[y:min(len(brightness_profile), y+10)])
+        # Clean up the mask with fast morphology
+        kernel = np.ones((5, 5), np.uint8)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
 
-            brightness_jump = after_avg - before_avg
+        # Find the largest white region (should be the whiteboard surface)
+        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # Look for significant increase in brightness (entering whiteboard)
-            if brightness_jump > max_jump and after_avg > self.whiteboard_threshold:
-                max_jump = brightness_jump
-                best_edge_y = y
+        if not contours:
+            # Fallback: use the whole image
+            return np.ones_like(white_mask, dtype=np.uint8) * 255
 
-        return best_edge_y
+        # Find largest contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        largest_area = cv2.contourArea(largest_contour)
+
+        # Check if it's big enough to be a whiteboard
+        if largest_area < self.whiteboard_area_threshold:
+            # Fallback: use the whole image
+            return np.ones_like(white_mask, dtype=np.uint8) * 255
+
+        # Create final mask from largest white region
+        final_mask = np.zeros_like(white_mask, dtype=np.uint8)
+        cv2.fillPoly(final_mask, [largest_contour], 255)
+
+        return final_mask
 
     def detect_markings(self, image: np.ndarray) -> List[Marking]:
         """
-        Detect markings using simple approach
+        Detect markings using white surface detection approach
 
-        1. Find whiteboard top edge
-        2. Look for dark spots below that edge
-        3. Minimal filtering
+        1. Find white drawing surface
+        2. Look for dark spots only within that surface
+        3. Minimal filtering for speed
         """
         start_time = time.time()
 
         # Correct camera orientation
         corrected = self.rotate_image_180(image)
 
-        # Convert to grayscale
+        # Find white surface directly from color image
+        white_surface_mask = self.find_white_surface(corrected)
+        self.last_whiteboard_mask = white_surface_mask
+
+        # Convert to grayscale for marking detection
         gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
 
-        # Apply small blur
+        # Apply minimal blur for speed
         blurred = cv2.GaussianBlur(gray, (self.gaussian_blur_size, self.gaussian_blur_size), 0)
 
-        # Find whiteboard top edge
-        whiteboard_top = self.find_whiteboard_top_edge(blurred)
-        self.last_whiteboard_top = whiteboard_top
-
-        # Create mask for area below whiteboard edge (add some padding)
-        mask = np.zeros_like(blurred, dtype=np.uint8)
-        padding = 20  # Small padding above detected edge
-        start_y = max(0, whiteboard_top - padding)
-        mask[start_y:, :] = 255
-
-        # Simple thresholding for dark markings
+        # Simple thresholding for dark markings (optimized threshold)
         _, binary = cv2.threshold(blurred, self.marking_threshold, 255, cv2.THRESH_BINARY_INV)
 
-        # Apply whiteboard mask
-        binary = cv2.bitwise_and(binary, mask)
+        # Apply white surface mask - only look within detected white area
+        binary = cv2.bitwise_and(binary, white_surface_mask)
 
         # Light morphological cleanup
         cleaned = cv2.erode(binary, self.erode_kernel, iterations=1)
@@ -185,11 +189,15 @@ class SimpleMarkingDetector:
                 center_x = x + w / 2
                 center_y = y + h / 2
 
-                # Simple confidence based on area and position
-                # Prefer markings well below the whiteboard edge
-                position_score = min(1.0, (center_y - whiteboard_top) / 100.0) if whiteboard_top > 0 else 1.0
+                # Simple confidence based on area and position within white surface
+                # Check if marking is well within the white surface
+                if white_surface_mask[int(center_y), int(center_x)] > 0:
+                    position_score = 1.0  # Inside white surface
+                else:
+                    position_score = 0.3  # Outside or on edge
+
                 area_score = min(1.0, area / 100.0)  # Bigger = more confident
-                confidence = (position_score * 0.6 + area_score * 0.4)
+                confidence = (position_score * 0.7 + area_score * 0.3)
 
                 marking = Marking(
                     x=center_x,
@@ -209,7 +217,8 @@ class SimpleMarkingDetector:
         if self.debug:
             avg_time = np.mean(self.processing_times)
             print(f"  Detected {len(markings)} markings in {processing_time*1000:.1f}ms")
-            print(f"  Whiteboard edge at y={whiteboard_top}")
+            white_area = np.sum(white_surface_mask) / 255.0  # Convert to pixel count
+            print(f"  White surface area: {white_area:.0f} pixels")
 
         return markings
 
@@ -256,14 +265,19 @@ class SimpleMarkingDetector:
         # Correct image orientation
         vis_image = self.rotate_image_180(image.copy())
 
-        # Draw whiteboard top edge line
-        if self.last_whiteboard_top is not None and self.last_whiteboard_top > 0:
-            cv2.line(vis_image, (0, self.last_whiteboard_top),
-                    (vis_image.shape[1], self.last_whiteboard_top), (0, 255, 255), 2)  # Yellow line
+        # Draw white surface boundary
+        if self.last_whiteboard_mask is not None:
+            # Find contours of the white surface
+            contours, _ = cv2.findContours(self.last_whiteboard_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                # Draw the boundary of the largest white surface
+                largest_contour = max(contours, key=cv2.contourArea)
+                cv2.drawContours(vis_image, [largest_contour], -1, (0, 255, 255), 2)  # Yellow boundary
 
             # Add text
-            cv2.putText(vis_image, f"Whiteboard edge: y={self.last_whiteboard_top}",
-                       (10, self.last_whiteboard_top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            white_area = np.sum(self.last_whiteboard_mask) / 255.0
+            cv2.putText(vis_image, f"White surface: {white_area:.0f}px",
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         # Draw markings with simple color coding
         for i, marking in enumerate(markings):
