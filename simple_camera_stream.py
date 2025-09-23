@@ -357,10 +357,10 @@ def main():
         controls = {
             "AeEnable": False,          # Disable auto-exposure
             "AwbEnable": False,         # Disable auto white balance
-            "ExposureTime": 8000,       # Fixed exposure time (microseconds)
-            "AnalogueGain": 2.0,        # Fixed analog gain
-            "Brightness": 0.2,          # Fixed brightness (0.0 to 1.0)
-            "Contrast": 1.2,            # Slightly higher contrast
+            "ExposureTime": 20000,      # Longer exposure for more light (microseconds)
+            "AnalogueGain": 4.0,        # Higher gain for brighter image
+            "Brightness": 0.6,          # Much higher brightness (0.0 to 1.0)
+            "Contrast": 1.1,            # Moderate contrast
         }
         picam2.set_controls(controls)
         print(f"✓ Camera controls set: {controls}")
