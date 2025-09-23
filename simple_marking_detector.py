@@ -170,18 +170,52 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # NEW APPROACH: Find holes in the white surface
-        # Step 1: Create "ideal" surface by filling holes in the detected surface
-        large_kernel = np.ones((15, 15), np.uint8)  # Large kernel to fill marking-sized holes
-        ideal_surface = cv2.morphologyEx(white_surface_mask, cv2.MORPH_CLOSE, large_kernel)
+        # MULTI-SCALE APPROACH: Use different kernel sizes for different image regions
+        # Bottom = close markings (large kernel), Middle = medium kernel, Top = distant markings (small kernel)
+        height = white_surface_mask.shape[0]
 
-        # Step 2: Find holes by subtracting original surface from ideal surface
-        holes = cv2.subtract(ideal_surface, white_surface_mask)
+        # Define regions
+        top_boundary = int(height * 0.33)      # Top 33% of image
+        bottom_boundary = int(height * 0.67)   # Bottom 33% of image
 
-        # Step 3: Clean up hole detection
-        # Remove very small noise
-        small_kernel = np.ones((3, 3), np.uint8)
-        holes_cleaned = cv2.morphologyEx(holes, cv2.MORPH_OPEN, small_kernel)
+        # Create masks for each region
+        top_mask = np.zeros_like(white_surface_mask)
+        middle_mask = np.zeros_like(white_surface_mask)
+        bottom_mask = np.zeros_like(white_surface_mask)
+
+        top_mask[:top_boundary, :] = white_surface_mask[:top_boundary, :]
+        middle_mask[top_boundary:bottom_boundary, :] = white_surface_mask[top_boundary:bottom_boundary, :]
+        bottom_mask[bottom_boundary:, :] = white_surface_mask[bottom_boundary:, :]
+
+        # Define kernels for each region
+        small_kernel = np.ones((7, 7), np.uint8)    # Small kernel for distant markings (top)
+        medium_kernel = np.ones((12, 12), np.uint8)  # Medium kernel for middle
+        large_kernel = np.ones((18, 18), np.uint8)   # Large kernel for close markings (bottom)
+
+        # Process each region separately
+        holes_combined = np.zeros_like(white_surface_mask)
+
+        # Top region (distant markings - small kernel)
+        if np.any(top_mask):
+            ideal_top = cv2.morphologyEx(top_mask, cv2.MORPH_CLOSE, small_kernel)
+            holes_top = cv2.subtract(ideal_top, top_mask)
+            holes_combined[:top_boundary, :] = holes_top[:top_boundary, :]
+
+        # Middle region (medium kernel)
+        if np.any(middle_mask):
+            ideal_middle = cv2.morphologyEx(middle_mask, cv2.MORPH_CLOSE, medium_kernel)
+            holes_middle = cv2.subtract(ideal_middle, middle_mask)
+            holes_combined[top_boundary:bottom_boundary, :] = holes_middle[top_boundary:bottom_boundary, :]
+
+        # Bottom region (close markings - large kernel)
+        if np.any(bottom_mask):
+            ideal_bottom = cv2.morphologyEx(bottom_mask, cv2.MORPH_CLOSE, large_kernel)
+            holes_bottom = cv2.subtract(ideal_bottom, bottom_mask)
+            holes_combined[bottom_boundary:, :] = holes_bottom[bottom_boundary:, :]
+
+        # Clean up combined hole detection
+        cleanup_kernel = np.ones((3, 3), np.uint8)
+        holes_cleaned = cv2.morphologyEx(holes_combined, cv2.MORPH_OPEN, cleanup_kernel)
 
         # Find contours of the holes (these are our markings!)
         contours, _ = cv2.findContours(holes_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -190,11 +224,26 @@ class SimpleMarkingDetector:
         for contour in contours:
             area = cv2.contourArea(contour)
 
-            # Very permissive area filtering
-            if self.min_marking_area <= area <= self.max_marking_area:
-                # Get bounding box
-                x, y, w, h = cv2.boundingRect(contour)
+            # Get bounding box to determine which region this marking is in
+            x, y, w, h = cv2.boundingRect(contour)
+            center_y = y + h / 2
 
+            # Distance-aware area thresholds based on image region
+            if center_y < top_boundary:
+                # Top region - distant markings, smaller area thresholds
+                min_area = 2
+                max_area = 300
+            elif center_y < bottom_boundary:
+                # Middle region - medium area thresholds
+                min_area = 4
+                max_area = 800
+            else:
+                # Bottom region - close markings, larger area thresholds
+                min_area = 6
+                max_area = 2000
+
+            # Region-appropriate area filtering
+            if min_area <= area <= max_area:
                 # Calculate center
                 center_x = x + w / 2
                 center_y = y + h / 2
@@ -228,25 +277,43 @@ class SimpleMarkingDetector:
             avg_time = np.mean(self.processing_times)
             print(f"  Detected {len(markings)} markings in {processing_time*1000:.1f}ms")
             white_area = np.sum(white_surface_mask) / 255.0
-            ideal_area = np.sum(ideal_surface) / 255.0
-            holes_area = np.sum(holes) / 255.0
+            holes_area = np.sum(holes_combined) / 255.0
             contour_count = len(contours)
-            print(f"  White surface: {white_area:.0f}px, Ideal: {ideal_area:.0f}px, Holes: {holes_area:.0f}px, Contours: {contour_count}")
+            print(f"  Multi-scale detection: Top(7x7) Mid(12x12) Bot(18x18)")
+            print(f"  White surface: {white_area:.0f}px, Holes: {holes_area:.0f}px, Contours: {contour_count}")
 
-            # Debug individual contours that were filtered out
-            area_too_small = 0
-            area_too_large = 0
+            # Debug individual contours by region
+            top_detections = 0
+            middle_detections = 0
+            bottom_detections = 0
+            total_filtered = 0
 
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if area < self.min_marking_area:
-                    area_too_small += 1
-                elif area > self.max_marking_area:
-                    area_too_large += 1
+                x, y, w, h = cv2.boundingRect(contour)
+                center_y = y + h / 2
 
-            total_filtered = area_too_small + area_too_large
-            if total_filtered > 0:
-                print(f"  Filtered: {area_too_small} too small (<{self.min_marking_area}), {area_too_large} too large (>{self.max_marking_area})")
+                # Determine region and thresholds
+                if center_y < top_boundary:
+                    min_area, max_area = 2, 300
+                    if min_area <= area <= max_area:
+                        top_detections += 1
+                    else:
+                        total_filtered += 1
+                elif center_y < bottom_boundary:
+                    min_area, max_area = 4, 800
+                    if min_area <= area <= max_area:
+                        middle_detections += 1
+                    else:
+                        total_filtered += 1
+                else:
+                    min_area, max_area = 6, 2000
+                    if min_area <= area <= max_area:
+                        bottom_detections += 1
+                    else:
+                        total_filtered += 1
+
+            print(f"  Detections by region: Top:{top_detections} Mid:{middle_detections} Bot:{bottom_detections} Filtered:{total_filtered}")
 
             # Show actual areas of first few contours for debugging
             if len(contours) > 0:
