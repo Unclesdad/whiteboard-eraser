@@ -1,221 +1,399 @@
 #!/usr/bin/env python3
+"""
+N20 Motor Controller with Magnetic Encoder
+For CHF-GM12-N20VA-298-6V+ABHL motors with TB6612FNG driver
 
-import atexit
+Motor Specifications:
+- 7 PPR (pulses per revolution) = 28 counts per revolution in quadrature
+- 6V rated voltage
+- 298:1 gear ratio
+- Magnetic Hall encoder with A/B phases
+"""
+
 import RPi.GPIO as GPIO
-import time
 import threading
-import signal
-import sys
-import numpy as np
+import time
 
-class MotorController:
-    # Class-level shared resources for encoder management
-    _encoder_thread = None
-    _encoder_positions = {}
-    _encoder_pins = {}
-    _encoder_last_states = {}
-    _running = False
-    _lock = threading.Lock()
-    _motor_count = 0
-    _polling_freq = 7500  # 7.5 kHz polling frequency
-    
-    def __init__(self, pwm_pin:int, in1_pin:int, in2_pin:int, stby_pin:int, enc_a_pin:int, enc_b_pin:int):
+class N20Motor:
+    def __init__(self, pwm_pin, dir1_pin, dir2_pin, enc_a_pin, enc_b_pin, 
+                 pwm_frequency=1000, name="Motor"):
         """
-        Initialize motor controller with encoder support.
+        Initialize N20 motor with encoder
         
         Args:
             pwm_pin: GPIO pin for PWM speed control
-            in1_pin: GPIO pin for motor direction control 1
-            in2_pin: GPIO pin for motor direction control 2  
-            stby_pin: GPIO pin for motor standby control
+            dir1_pin: GPIO pin for direction control 1
+            dir2_pin: GPIO pin for direction control 2
             enc_a_pin: GPIO pin for encoder channel A
             enc_b_pin: GPIO pin for encoder channel B
+            pwm_frequency: PWM frequency in Hz (default 1000)
+            name: Motor name for identification
         """
-        GPIO.cleanup()
-
-        self.PWM = pwm_pin
-        self.IN1 = in1_pin
-        self.IN2 = in2_pin
-        self.STBY = stby_pin
+        self.pwm_pin = pwm_pin
+        self.dir1_pin = dir1_pin
+        self.dir2_pin = dir2_pin
+        self.enc_a_pin = enc_a_pin
+        self.enc_b_pin = enc_b_pin
+        self.name = name
         
-        # Register this motor's encoder
-        with MotorController._lock:
-            self.motor_id = MotorController._motor_count
-            MotorController._motor_count += 1
-            MotorController._encoder_pins[self.motor_id] = (enc_a_pin, enc_b_pin)
-            MotorController._encoder_positions[self.motor_id] = 0
-
-        self.setup_gpio()
-
-        self.pwm = GPIO.PWM(self.PWM, 1000)
+        # Encoder state
+        self.encoder_count = 0
+        self.last_a_state = 0
+        self.last_b_state = 0
+        self._encoder_lock = threading.Lock()
+        
+        # Motor state
+        self.current_speed = 0.0  # -1.0 to 1.0
+        
+        # Setup GPIO
+        self._setup_gpio(pwm_frequency)
+        
+        # Setup encoder interrupts
+        self._setup_encoder_interrupts()
+        
+    def _setup_gpio(self, pwm_frequency):
+        """Setup GPIO pins for motor control"""
+        # Setup motor control pins
+        GPIO.setup(self.pwm_pin, GPIO.OUT)
+        GPIO.setup(self.dir1_pin, GPIO.OUT)
+        GPIO.setup(self.dir2_pin, GPIO.OUT)
+        
+        # Setup PWM
+        self.pwm = GPIO.PWM(self.pwm_pin, pwm_frequency)
         self.pwm.start(0)
         
-        # Start encoder thread if first motor
-        with MotorController._lock:
-            if not MotorController._running:
-                MotorController._start_encoder_thread()
-
-        # make it exit cleanly
-        def cleanup_handler(signum, frame):
-            MotorController._running = False
-            if MotorController._encoder_thread:
-                MotorController._encoder_thread.join(timeout=1.0)
-            GPIO.cleanup()
-            sys.exit(0)
-
-        signal.signal(signal.SIGINT, cleanup_handler)
-
-        atexit.register(lambda: (setattr(MotorController, '_running', False), GPIO.cleanup()))
-
-    def setup_gpio(self):
-        """Configure GPIO pins for motor control."""
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-
-        GPIO.setup(self.PWM, GPIO.OUT)
-        GPIO.setup(self.IN1, GPIO.OUT)
-        GPIO.setup(self.IN2, GPIO.OUT)
-
-        GPIO.setup(self.STBY, GPIO.OUT)
+        # Setup encoder pins
+        GPIO.setup(self.enc_a_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(self.enc_b_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
-        GPIO.output(self.IN1, GPIO.LOW)
-        GPIO.output(self.IN2, GPIO.LOW)
+        # Read initial encoder states
+        self.last_a_state = GPIO.input(self.enc_a_pin)
+        self.last_b_state = GPIO.input(self.enc_b_pin)
         
-        GPIO.output(self.STBY, GPIO.HIGH)
-
-    def set(self, power):
-        """
-        Set motor power and direction.
+    def _setup_encoder_interrupts(self):
+        """Setup interrupt handlers for encoder"""
+        # Remove any existing event detection first
+        try:
+            GPIO.remove_event_detect(self.enc_a_pin)
+            GPIO.remove_event_detect(self.enc_b_pin)
+        except:
+            pass
         
-        Args:
-            power: Motor power from -1.0 to 1.0 (negative = reverse)
-        """
-        power = min(max(power, -1), 1)
-
-        sign = np.sign(power)
-
-        if sign == 1:
-            GPIO.output(self.IN1, GPIO.HIGH)
-            GPIO.output(self.IN2, GPIO.LOW)
-        elif sign == -1:
-            GPIO.output(self.IN1, GPIO.LOW)
-            GPIO.output(self.IN2, GPIO.HIGH)
-        else:
-            GPIO.output(self.IN1, GPIO.LOW)
-            GPIO.output(self.IN2, GPIO.LOW)
-
-        self.pwm.ChangeDutyCycle(abs(power * 100))
-
-    @classmethod
-    def _start_encoder_thread(cls):
-        """Start the shared encoder polling thread at 7500Hz."""
-        cls._running = True
-        cls._encoder_thread = threading.Thread(target=cls._encoder_loop, daemon=True)
-        cls._encoder_thread.start()
-        print(f"Encoder polling started at {cls._polling_freq} Hz")
+        # Add event detection with minimal bouncetime for better responsiveness
+        GPIO.add_event_detect(self.enc_a_pin, GPIO.BOTH, 
+                            callback=self._encoder_callback, bouncetime=1)
+        GPIO.add_event_detect(self.enc_b_pin, GPIO.BOTH, 
+                            callback=self._encoder_callback, bouncetime=1)
     
-    @classmethod
-    def _encoder_loop(cls):
+    def _encoder_callback(self, channel):
         """
-        High-speed encoder polling loop running at 7500Hz.
-        Monitors all motor encoders simultaneously using quadrature decoding.
+        Encoder interrupt callback for quadrature decoding
+        Uses standard quadrature decoding logic with improved state tracking
         """
-        # Setup GPIO mode for encoder thread
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        
-        # Setup all encoder pins
-        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-            GPIO.setup(pin_a, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(pin_b, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        
-        # Initialize last states for edge detection
-        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-            cls._encoder_last_states[motor_id] = GPIO.input(pin_a)
-        
-        polling_interval = 1.0 / cls._polling_freq
-        next_poll = time.perf_counter()
-        
-        while cls._running:
-            # Ultra-fast encoder reading for all motors
-            for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-                a_state = GPIO.input(pin_a)
-                b_state = GPIO.input(pin_b)
-                last_a = cls._encoder_last_states[motor_id]
-                
-                # Process encoder changes using our optimized method
-                if a_state != last_a:
-                    if a_state == b_state:
-                        cls._encoder_positions[motor_id] += 1
+        with self._encoder_lock:
+            a_state = GPIO.input(self.enc_a_pin)
+            b_state = GPIO.input(self.enc_b_pin)
+            
+            # Only process if this is actually a state change
+            if channel == self.enc_a_pin and a_state != self.last_a_state:
+                # A channel changed
+                if (self.last_a_state == 0 and a_state == 1):
+                    # Rising edge on A
+                    if b_state == 0:
+                        self.encoder_count += 1  # Forward
                     else:
-                        cls._encoder_positions[motor_id] -= 1
-                    cls._encoder_last_states[motor_id] = a_state
-            
-            # Precise timing control
-            next_poll += polling_interval
-            sleep_time = next_poll - time.perf_counter()
-            
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                        self.encoder_count -= 1  # Reverse
+                elif (self.last_a_state == 1 and a_state == 0):
+                    # Falling edge on A
+                    if b_state == 1:
+                        self.encoder_count += 1  # Forward
+                    else:
+                        self.encoder_count -= 1  # Reverse
+                self.last_a_state = a_state
+                
+            elif channel == self.enc_b_pin and b_state != self.last_b_state:
+                # B channel changed
+                if (self.last_b_state == 0 and b_state == 1):
+                    # Rising edge on B
+                    if a_state == 1:
+                        self.encoder_count += 1  # Forward
+                    else:
+                        self.encoder_count -= 1  # Reverse
+                elif (self.last_b_state == 1 and b_state == 0):
+                    # Falling edge on B
+                    if a_state == 0:
+                        self.encoder_count += 1  # Forward
+                    else:
+                        self.encoder_count -= 1  # Reverse
+                self.last_b_state = b_state
     
-    def get_position(self):
+    def set(self, speed):
         """
-        Get current encoder position in counts.
-        
-        Returns:
-            int: Current encoder count (positive = forward, negative = reverse)
-        """
-        with MotorController._lock:
-            return MotorController._encoder_positions.get(self.motor_id, 0)
-    
-    def reset_position(self):
-        """Reset encoder position to zero."""
-        with MotorController._lock:
-            MotorController._encoder_positions[self.motor_id] = 0
-    
-    def get_speed(self, window_time=0.5):
-        """
-        Calculate motor speed by measuring position change over time.
+        Set motor speed and direction
         
         Args:
-            window_time: Time window in seconds for speed calculation
-            
-        Returns:
-            float: Speed in encoder counts per second
+            speed: Float from -1.0 to 1.0
+                  -1.0 = full speed reverse
+                   0.0 = stop
+                   1.0 = full speed forward
         """
-        start_pos = self.get_position()
-        time.sleep(window_time)
-        end_pos = self.get_position()
-        return (end_pos - start_pos) / window_time
-
-def test_motor_controller():
-    # Updated pin assignments to match our testing
-    motor = MotorController(18, 23, 24, 22, 17, 27)  # Using pins 17, 27 for encoder
-
-    def set_then_wait(set_power:float, sleeptime:float):
-        start_pos = motor.get_position()
-        print(f'Setting power: {set_power:.1f}, start position: {start_pos}')
-        motor.set(set_power)
-        time.sleep(sleeptime)  
-        end_pos = motor.get_position()
-        counts = end_pos - start_pos
-        rate = abs(counts) / 2.0  # counts per second
-        print(f'  End position: {end_pos}, counts: {counts}, rate: {rate:.1f} cps')
-
-    sample_powers = [0.3, 0.4, 0.5, 0.6, 0.8, 0, -0.4, -0.6, -0.8, 0]
-
-    print("Starting motor test with optimized 7.5kHz encoder polling...")
-    time.sleep(1)  # Let encoder thread stabilize
-    
-    motor.reset_position()  # Start from zero
-    
-    for power in sample_powers:
-        set_then_wait(power,2)
+        # Clamp speed to valid range
+        speed = max(-1.0, min(1.0, speed))
+        self.current_speed = speed
         
-    print(f'\nTest complete. Final position: {motor.get_position()}')
-    print("Encoder polling will continue in background for CV integration")
+        # Calculate PWM duty cycle (0-100%)
+        duty_cycle = abs(speed) * 100
+        
+        if speed > 0:
+            # Forward direction
+            GPIO.output(self.dir1_pin, GPIO.HIGH)
+            GPIO.output(self.dir2_pin, GPIO.LOW)
+        elif speed < 0:
+            # Reverse direction
+            GPIO.output(self.dir1_pin, GPIO.LOW)
+            GPIO.output(self.dir2_pin, GPIO.HIGH)
+        else:
+            # Stop (brake)
+            GPIO.output(self.dir1_pin, GPIO.LOW)
+            GPIO.output(self.dir2_pin, GPIO.LOW)
+        
+        # Set PWM duty cycle
+        self.pwm.ChangeDutyCycle(duty_cycle)
+    
+    def get_encoder_count(self):
+        """
+        Get current encoder count
+        
+        Returns:
+            int: Current encoder count (can be negative)
+        """
+        with self._encoder_lock:
+            return self.encoder_count
+    
+    def reset_encoder(self):
+        """Reset encoder count to zero"""
+        with self._encoder_lock:
+            self.encoder_count = 0
+    
+    def get_revolutions(self):
+        """
+        Get motor shaft revolutions based on encoder count
+        
+        Returns:
+            float: Number of revolutions (28 counts = 1 revolution for 7 PPR quadrature)
+        """
+        with self._encoder_lock:
+            return self.encoder_count / 28.0
+    
+    def get_speed(self):
+        """
+        Get current speed setting
+        
+        Returns:
+            float: Current speed from -1.0 to 1.0
+        """
+        return self.current_speed
+    
+    def get_encoder_states(self):
+        """
+        Get current encoder pin states for debugging
+        
+        Returns:
+            tuple: (A_state, B_state, last_A_state, last_B_state)
+        """
+        with self._encoder_lock:
+            current_a = GPIO.input(self.enc_a_pin)
+            current_b = GPIO.input(self.enc_b_pin)
+            return (current_a, current_b, self.last_a_state, self.last_b_state)
+    
+    def get_status(self):
+        """
+        Get comprehensive motor status for debugging
+        
+        Returns:
+            dict: Motor status information
+        """
+        a_state, b_state, last_a, last_b = self.get_encoder_states()
+        return {
+            'name': self.name,
+            'speed': self.current_speed,
+            'encoder_count': self.get_encoder_count(),
+            'revolutions': self.get_revolutions(),
+            'encoder_a_current': a_state,
+            'encoder_b_current': b_state,
+            'encoder_a_last': last_a,
+            'encoder_b_last': last_b
+        }
+    
+    def stop(self):
+        """Stop the motor"""
+        self.set(0)
+    
+    def cleanup(self):
+        """Clean up GPIO and PWM"""
+        try:
+            self.stop()
+            time.sleep(0.1)  # Give time for PWM to stop
+            self.pwm.stop()
+        except:
+            pass
+        
+        try:
+            GPIO.remove_event_detect(self.enc_a_pin)
+        except:
+            pass
+        try:
+            GPIO.remove_event_detect(self.enc_b_pin)
+        except:
+            pass
 
-    set_then_wait(0,10)
 
-if __name__ == '__main__':
-    test_motor_controller()
+class DualMotorController:
+    """Controller for two N20 motors with standby control"""
+    
+    def __init__(self, standby_pin):
+        """
+        Initialize dual motor controller
+        
+        Args:
+            standby_pin: GPIO pin for TB6612FNG standby control
+        """
+        self.standby_pin = standby_pin
+        
+        # Setup standby pin
+        GPIO.setup(self.standby_pin, GPIO.OUT)
+        self.enable()
+        
+        # Motor instances (to be set by user)
+        self.motor_a = None
+        self.motor_b = None
+    
+    def enable(self):
+        """Enable motor driver (standby HIGH)"""
+        GPIO.output(self.standby_pin, GPIO.HIGH)
+    
+    def disable(self):
+        """Disable motor driver (standby LOW)"""
+        GPIO.output(self.standby_pin, GPIO.LOW)
+    
+    def cleanup(self):
+        """Clean up all motors and GPIO"""
+        try:
+            if self.motor_a:
+                self.motor_a.cleanup()
+            if self.motor_b:
+                self.motor_b.cleanup()
+            time.sleep(0.1)
+            self.disable()
+        except Exception as e:
+            print(f"Warning during cleanup: {e}")
+            pass
+
+
+# Example usage based on your wiring configuration
+if __name__ == "__main__":
+    # Initialize GPIO
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    
+    try:
+        # Create dual motor controller with standby control
+        controller = DualMotorController(standby_pin=22)
+        
+        # Create Motor A (your motor 1)
+        motor_a = N20Motor(
+            pwm_pin=18,    # PWMA
+            dir1_pin=23,   # AIN1
+            dir2_pin=24,   # AIN2
+            enc_a_pin=17,  # Motor 1 Encoder A
+            enc_b_pin=27,  # Motor 1 Encoder B
+            name="Motor A"
+        )
+        
+        # Create Motor B (your motor 2)
+        motor_b = N20Motor(
+            pwm_pin=19,    # PWMB
+            dir1_pin=25,   # BIN1
+            dir2_pin=8,    # BIN2
+            enc_a_pin=5,   # Motor 2 Encoder A
+            enc_b_pin=6,   # Motor 2 Encoder B
+            name="Motor B"
+        )
+        
+        controller.motor_a = motor_a
+        controller.motor_b = motor_b
+        
+        print("Motor test starting...")
+        
+        # Reset encoders before testing
+        motor_a.reset_encoder()
+        motor_b.reset_encoder()
+        
+        try:
+            # Check initial encoder states
+            print(f"Initial Motor A encoder states: {motor_a.get_encoder_states()}")
+            print(f"Initial Motor B encoder states: {motor_b.get_encoder_states()}")
+            
+            print("\nTesting Motor A forward at 50%")
+            motor_a.set(0.5)
+            
+            # Monitor encoder counts during movement
+            start_time = time.time()
+            while time.time() - start_time < 3:  # Extended test time
+                time.sleep(0.5)
+                count = motor_a.get_encoder_count()
+                states = motor_a.get_encoder_states()
+                print(f"  Time: {time.time() - start_time:.1f}s, Count: {count}, States: A={states[0]}, B={states[1]}")
+            
+            motor_a.stop()
+            final_count_a = motor_a.get_encoder_count()
+            print(f"Motor A final count: {final_count_a}, revolutions: {motor_a.get_revolutions():.2f}")
+            
+            time.sleep(1)
+            
+            print("\nTesting Motor B forward at 50%")
+            motor_b.reset_encoder()
+            motor_b.set(0.5)
+            
+            # Monitor encoder counts during movement
+            start_time = time.time()
+            while time.time() - start_time < 3:
+                time.sleep(0.5)
+                count = motor_b.get_encoder_count()
+                states = motor_b.get_encoder_states()
+                print(f"  Time: {time.time() - start_time:.1f}s, Count: {count}, States: A={states[0]}, B={states[1]}")
+            
+            motor_b.stop()
+            final_count_b = motor_b.get_encoder_count()
+            print(f"Motor B final count: {final_count_b}, revolutions: {motor_b.get_revolutions():.2f}")
+            
+            time.sleep(1)
+            
+            # Test direction reversal
+            print("\nTesting Motor A reverse at 50%")
+            motor_a.reset_encoder()
+            motor_a.set(-0.5)
+            time.sleep(2)
+            motor_a.stop()
+            reverse_count_a = motor_a.get_encoder_count()
+            print(f"Motor A reverse count: {reverse_count_a}, revolutions: {motor_a.get_revolutions():.2f}")
+            
+            # Final status check
+            print("\nFinal Status:")
+            print(f"Motor A: {motor_a.get_status()}")
+            print(f"Motor B: {motor_b.get_status()}")
+            
+        except Exception as test_error:
+            print(f"Error during test: {test_error}")
+            motor_a.stop()
+            motor_b.stop()
+    
+    except KeyboardInterrupt:
+        print("\nTest interrupted")
+    
+    finally:
+        # Clean up
+        print("Cleaning up...")
+        controller.cleanup()
+        GPIO.cleanup()
+        print("Done")
