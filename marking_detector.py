@@ -60,10 +60,17 @@ class MarkingDetector:
         self.gaussian_blur_size = 3  # Small blur for noise reduction
 
         # Whiteboard surface detection parameters
-        self.whiteboard_brightness_threshold = 180  # Minimum brightness for whiteboard surface
+        self.whiteboard_brightness_threshold = 150  # Lowered minimum brightness for whiteboard surface
         self.whiteboard_area_threshold = 1000  # Minimum whiteboard area in pixels
-        self.edge_exclusion_pixels = 15  # Exclude detections within this distance from whiteboard edges
-        self.contrast_threshold = 40  # Minimum local contrast against white background
+        self.edge_exclusion_pixels = 8  # Reduced exclusion distance from whiteboard edges
+        self.contrast_threshold = 20  # Lowered minimum local contrast against white background
+
+        # Edge detection parameters for whiteboard boundary
+        self.canny_low_threshold = 50
+        self.canny_high_threshold = 150
+        self.hough_threshold = 50
+        self.min_line_length = 100
+        self.max_line_gap = 10
 
         # Morphological operations kernels
         self.erode_kernel = np.ones((2, 2), np.uint8)
@@ -73,6 +80,10 @@ class MarkingDetector:
 
         # Performance tracking
         self.processing_times = []
+
+        # Debug information (stored for visualization)
+        self.last_detected_edges = []
+        self.last_whiteboard_mask = None
 
         # Calculate pixel-to-mm conversion factors
         self._calculate_pixel_to_mm_factors()
@@ -145,57 +156,77 @@ class MarkingDetector:
 
         return blurred
 
-    def _detect_whiteboard_surface(self, gray_image: np.ndarray) -> np.ndarray:
+    def _detect_whiteboard_edges(self, gray_image: np.ndarray) -> Tuple[np.ndarray, List]:
         """
-        Detect whiteboard surface area to focus marking detection
+        Detect whiteboard edges/boundaries to define the whiteboard surface area
 
         Args:
             gray_image: Preprocessed grayscale image
 
         Returns:
-            Binary mask where white pixels represent whiteboard surface
+            Tuple of (whiteboard_mask, detected_lines) where mask represents area below edges
         """
-        # Find bright areas (potential whiteboard surface)
-        _, bright_mask = cv2.threshold(gray_image, self.whiteboard_brightness_threshold, 255, cv2.THRESH_BINARY)
+        # Apply edge detection
+        edges = cv2.Canny(gray_image, self.canny_low_threshold, self.canny_high_threshold)
 
-        # Clean up the mask with morphological operations
-        # Remove small noise
-        cleaned = cv2.erode(bright_mask, self.whiteboard_erode_kernel, iterations=1)
-        # Fill in small gaps
-        cleaned = cv2.dilate(cleaned, self.whiteboard_dilate_kernel, iterations=2)
-        # Smooth edges
-        cleaned = cv2.erode(cleaned, self.whiteboard_erode_kernel, iterations=1)
+        # Detect lines using Hough transform
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180,
+                               threshold=self.hough_threshold,
+                               minLineLength=self.min_line_length,
+                               maxLineGap=self.max_line_gap)
 
-        # Find the largest bright region (main whiteboard surface)
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Create mask for whiteboard surface
+        mask = np.ones_like(gray_image, dtype=np.uint8) * 255
+        detected_lines = []
 
-        if not contours:
-            # If no whiteboard detected, use whole image (fallback)
-            return np.ones_like(gray_image, dtype=np.uint8) * 255
+        if lines is not None:
+            # Process detected lines to find whiteboard boundaries
+            valid_lines = []
 
-        # Find largest contour that meets minimum area requirement
-        largest_contour = None
-        largest_area = 0
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
 
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > self.whiteboard_area_threshold and area > largest_area:
-                largest_area = area
-                largest_contour = contour
+                # Calculate line angle
+                angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
 
-        if largest_contour is None:
-            # No suitable whiteboard found, use whole image (fallback)
-            return np.ones_like(gray_image, dtype=np.uint8) * 255
+                # Filter lines that could be whiteboard edges
+                # Accept lines with reasonable angles (not too vertical/horizontal)
+                if abs(angle) > 10 and abs(angle) < 80:
+                    valid_lines.append((x1, y1, x2, y2))
 
-        # Create mask for the whiteboard surface
-        whiteboard_mask = np.zeros_like(gray_image, dtype=np.uint8)
-        cv2.fillPoly(whiteboard_mask, [largest_contour], 255)
+            # If we found valid edge lines, create mask below them
+            if valid_lines:
+                detected_lines = valid_lines
 
-        # Erode the mask to exclude edges (where false detections often occur)
-        edge_exclusion_kernel = np.ones((self.edge_exclusion_pixels, self.edge_exclusion_pixels), np.uint8)
-        whiteboard_mask = cv2.erode(whiteboard_mask, edge_exclusion_kernel, iterations=1)
+                # Create mask that includes area below the detected edges
+                mask = np.zeros_like(gray_image, dtype=np.uint8)
 
-        return whiteboard_mask
+                # For each valid line, determine the "below" area
+                for x1, y1, x2, y2 in valid_lines:
+                    # Create a line mask
+                    line_mask = np.zeros_like(gray_image, dtype=np.uint8)
+                    cv2.line(line_mask, (x1, y1), (x2, y2), 255, self.edge_exclusion_pixels)
+
+                    # Fill area below the line (whiteboard surface)
+                    # Find the bottom-most y coordinate of the line
+                    line_y = max(y1, y2)
+
+                    # Fill rectangle below this line
+                    cv2.rectangle(mask, (0, line_y), (gray_image.shape[1], gray_image.shape[0]), 255, -1)
+
+                    # Subtract the line itself to avoid detecting it as a marking
+                    mask = cv2.bitwise_and(mask, cv2.bitwise_not(line_mask))
+
+        # If no edges found or mask is empty, fall back to brightness-based detection
+        if np.sum(mask) < self.whiteboard_area_threshold:
+            # Fallback: use brightness threshold
+            _, mask = cv2.threshold(gray_image, self.whiteboard_brightness_threshold, 255, cv2.THRESH_BINARY)
+
+            # Clean up the mask
+            mask = cv2.erode(mask, self.whiteboard_erode_kernel, iterations=1)
+            mask = cv2.dilate(mask, self.whiteboard_dilate_kernel, iterations=1)
+
+        return mask, detected_lines
 
     def _calculate_local_contrast(self, gray_image: np.ndarray, x: int, y: int, w: int, h: int) -> float:
         """
@@ -263,9 +294,13 @@ class MarkingDetector:
         """
         start_time = time.time()
 
-        # Stage 1: Preprocess image and detect whiteboard surface
+        # Stage 1: Preprocess image and detect whiteboard edges/surface
         gray = self.preprocess_image(image)
-        whiteboard_mask = self._detect_whiteboard_surface(gray)
+        whiteboard_mask, detected_edges = self._detect_whiteboard_edges(gray)
+
+        # Store debug information
+        self.last_detected_edges = detected_edges
+        self.last_whiteboard_mask = whiteboard_mask
 
         # Stage 2: Detect markings only within whiteboard area
         # Create binary mask for dark markings
@@ -503,6 +538,23 @@ class MarkingDetector:
 
         # Correct image orientation
         vis_image = self.rotate_image_180(image.copy())
+
+        # Draw detected whiteboard edges/boundaries (if available)
+        if self.debug and self.last_detected_edges:
+            for x1, y1, x2, y2 in self.last_detected_edges:
+                cv2.line(vis_image, (x1, y1), (x2, y2), (255, 0, 255), 3)  # Magenta lines
+
+            # Add edge detection info
+            edge_text = f"Edges: {len(self.last_detected_edges)}"
+            cv2.putText(vis_image, edge_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
+        # Draw whiteboard mask area (semi-transparent overlay)
+        if self.debug and self.last_whiteboard_mask is not None:
+            # Create colored overlay for whiteboard area
+            mask_overlay = np.zeros_like(vis_image)
+            mask_overlay[:, :, 1] = self.last_whiteboard_mask  # Green channel
+            # Blend with original image
+            vis_image = cv2.addWeighted(vis_image, 0.9, mask_overlay, 0.1, 0)
 
         # Draw markings
         for i, marking in enumerate(markings):
