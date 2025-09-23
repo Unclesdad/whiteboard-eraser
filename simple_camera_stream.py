@@ -348,7 +348,22 @@ def main():
         # Initialize camera
         print("📷 Starting camera...")
         picam2 = Picamera2(camera_num=0)
-        picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
+
+        # Create configuration with manual controls
+        config = picam2.create_video_configuration(main={"size": (640, 480)})
+        picam2.configure(config)
+
+        # Set manual camera controls for consistent brightness
+        controls = {
+            "AeEnable": False,          # Disable auto-exposure
+            "AwbEnable": False,         # Disable auto white balance
+            "ExposureTime": 8000,       # Fixed exposure time (microseconds)
+            "AnalogueGain": 2.0,        # Fixed analog gain
+            "Brightness": 0.2,          # Fixed brightness (0.0 to 1.0)
+            "Contrast": 1.2,            # Slightly higher contrast
+        }
+        picam2.set_controls(controls)
+        print(f"✓ Camera controls set: {controls}")
 
         # Initialize simple detection output
         output = SimpleDetectionOutput()

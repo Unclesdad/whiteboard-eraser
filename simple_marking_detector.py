@@ -42,10 +42,10 @@ class SimpleMarkingDetector:
         self.image_height = image_height
         self.debug = debug
 
-        # Simple detection parameters
-        self.min_marking_area = 8   # Very permissive for small pen marks
-        self.max_marking_area = 1000
-        self.marking_threshold = 70  # Lower threshold to catch pen marks on white surface
+        # Simple detection parameters - very permissive for debugging
+        self.min_marking_area = 5   # Even smaller minimum
+        self.max_marking_area = 2000 # Larger maximum
+        self.marking_threshold = 120  # Much higher threshold - pen marks are darker than this
         self.gaussian_blur_size = 3
 
         # Whiteboard detection - much simpler
@@ -230,8 +230,19 @@ class SimpleMarkingDetector:
         if self.debug:
             avg_time = np.mean(self.processing_times)
             print(f"  Detected {len(markings)} markings in {processing_time*1000:.1f}ms")
-            white_area = np.sum(white_surface_mask) / 255.0  # Convert to pixel count
-            print(f"  White surface area: {white_area:.0f} pixels")
+            white_area = np.sum(white_surface_mask) / 255.0
+            binary_area = np.sum(binary) / 255.0
+            contour_count = len(contours)
+            print(f"  White surface: {white_area:.0f}px, Binary: {binary_area:.0f}px, Contours: {contour_count}")
+
+            # Debug individual contours that were filtered out
+            filtered_count = 0
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if not (self.min_marking_area <= area <= self.max_marking_area):
+                    filtered_count += 1
+            if filtered_count > 0:
+                print(f"  Filtered out {filtered_count} contours by area (min={self.min_marking_area}, max={self.max_marking_area})")
 
         return markings
 
