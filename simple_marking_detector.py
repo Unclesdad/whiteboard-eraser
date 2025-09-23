@@ -50,6 +50,7 @@ class SimpleMarkingDetector:
 
         # Whiteboard detection - much simpler
         self.whiteboard_threshold = 140  # Lower threshold for whiteboard detection
+        self.whiteboard_area_threshold = 1000  # Minimum area for valid whiteboard surface
         self.top_edge_search_height = 200  # Only look in top 200 pixels for edge
 
         # Morphological operations
