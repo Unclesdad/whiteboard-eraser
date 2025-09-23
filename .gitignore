@@ -209,3 +209,5 @@ __marimo__/
 test_output/
 
 .claude
+
+test_images/
