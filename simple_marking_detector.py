@@ -43,9 +43,9 @@ class SimpleMarkingDetector:
         self.debug = debug
 
         # Simple detection parameters
-        self.min_marking_area = 15  # Even more permissive
-        self.max_marking_area = 800
-        self.marking_threshold = 85  # Slightly higher to catch pen marks
+        self.min_marking_area = 10  # Very permissive for small pen marks
+        self.max_marking_area = 1000
+        self.marking_threshold = 75  # Lower threshold to catch lighter pen marks
         self.gaussian_blur_size = 3
 
         # Whiteboard detection - much simpler
@@ -98,48 +98,51 @@ class SimpleMarkingDetector:
 
     def find_white_surface(self, image: np.ndarray) -> np.ndarray:
         """
-        Find the white drawing surface using color-based detection
+        Find the whiteboard surface using bottom-up detection
+        Camera is ON the whiteboard, so surface appears at bottom of frame
 
         Returns:
-            Binary mask where white pixels represent the drawing surface
+            Binary mask where white pixels represent the whiteboard surface
         """
+        height, width = image.shape[:2]
+
         # Convert to HSV for better white detection
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        # Define range for white/light colors
-        # HSV ranges: H(0-179), S(0-255), V(0-255)
-        lower_white = np.array([0, 0, 180])      # Low saturation, high value
-        upper_white = np.array([179, 30, 255])   # Any hue, low saturation, high value
+        # More restrictive white detection - only very white areas
+        lower_white = np.array([0, 0, 210])      # Very high brightness
+        upper_white = np.array([179, 20, 255])   # Very low saturation
 
-        # Create mask for white areas
+        # Create initial white mask
         white_mask = cv2.inRange(hsv, lower_white, upper_white)
 
-        # Clean up the mask with fast morphology
-        kernel = np.ones((5, 5), np.uint8)
-        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
+        # Start from bottom edge and scan upward to find whiteboard surface
+        surface_mask = np.zeros_like(white_mask, dtype=np.uint8)
 
-        # Find the largest white region (should be the whiteboard surface)
-        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # For each column, find how far up the white surface extends from bottom
+        for x in range(width):
+            # Start from bottom row and go up
+            for y in range(height - 1, -1, -1):
+                if white_mask[y, x] > 0:
+                    # Found white pixel - mark it as part of surface
+                    surface_mask[y, x] = 255
+                else:
+                    # Hit non-white area - stop scanning up this column
+                    break
 
-        if not contours:
-            # Fallback: use the whole image
-            return np.ones_like(white_mask, dtype=np.uint8) * 255
+        # Clean up the surface mask slightly
+        kernel = np.ones((3, 3), np.uint8)
+        surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_CLOSE, kernel)
 
-        # Find largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        largest_area = cv2.contourArea(largest_contour)
+        # Ensure the surface connects to the bottom edge
+        # Fill any small gaps near the bottom
+        bottom_rows = 20  # Look at bottom 20 pixels
+        for y in range(height - bottom_rows, height):
+            for x in range(width):
+                if white_mask[y, x] > 0:
+                    surface_mask[y, x] = 255
 
-        # Check if it's big enough to be a whiteboard
-        if largest_area < self.whiteboard_area_threshold:
-            # Fallback: use the whole image
-            return np.ones_like(white_mask, dtype=np.uint8) * 255
-
-        # Create final mask from largest white region
-        final_mask = np.zeros_like(white_mask, dtype=np.uint8)
-        cv2.fillPoly(final_mask, [largest_contour], 255)
-
-        return final_mask
+        return surface_mask
 
     def detect_markings(self, image: np.ndarray) -> List[Marking]:
         """
