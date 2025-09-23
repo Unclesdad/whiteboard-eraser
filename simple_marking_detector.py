@@ -170,24 +170,21 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # Convert to grayscale for marking detection
-        gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+        # NEW APPROACH: Find holes in the white surface
+        # Step 1: Create "ideal" surface by filling holes in the detected surface
+        large_kernel = np.ones((15, 15), np.uint8)  # Large kernel to fill marking-sized holes
+        ideal_surface = cv2.morphologyEx(white_surface_mask, cv2.MORPH_CLOSE, large_kernel)
 
-        # Apply minimal blur for speed
-        blurred = cv2.GaussianBlur(gray, (self.gaussian_blur_size, self.gaussian_blur_size), 0)
+        # Step 2: Find holes by subtracting original surface from ideal surface
+        holes = cv2.subtract(ideal_surface, white_surface_mask)
 
-        # Simple thresholding for dark markings (optimized threshold)
-        _, binary = cv2.threshold(blurred, self.marking_threshold, 255, cv2.THRESH_BINARY_INV)
+        # Step 3: Clean up hole detection
+        # Remove very small noise
+        small_kernel = np.ones((3, 3), np.uint8)
+        holes_cleaned = cv2.morphologyEx(holes, cv2.MORPH_OPEN, small_kernel)
 
-        # Apply white surface mask - only look within detected white area
-        binary = cv2.bitwise_and(binary, white_surface_mask)
-
-        # Light morphological cleanup
-        cleaned = cv2.erode(binary, self.erode_kernel, iterations=1)
-        cleaned = cv2.dilate(cleaned, self.dilate_kernel, iterations=1)
-
-        # Find contours
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours of the holes (these are our markings!)
+        contours, _ = cv2.findContours(holes_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         markings = []
         for contour in contours:
@@ -231,18 +228,30 @@ class SimpleMarkingDetector:
             avg_time = np.mean(self.processing_times)
             print(f"  Detected {len(markings)} markings in {processing_time*1000:.1f}ms")
             white_area = np.sum(white_surface_mask) / 255.0
-            binary_area = np.sum(binary) / 255.0
+            ideal_area = np.sum(ideal_surface) / 255.0
+            holes_area = np.sum(holes) / 255.0
             contour_count = len(contours)
-            print(f"  White surface: {white_area:.0f}px, Binary: {binary_area:.0f}px, Contours: {contour_count}")
+            print(f"  White surface: {white_area:.0f}px, Ideal: {ideal_area:.0f}px, Holes: {holes_area:.0f}px, Contours: {contour_count}")
 
             # Debug individual contours that were filtered out
-            filtered_count = 0
+            area_too_small = 0
+            area_too_large = 0
+
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if not (self.min_marking_area <= area <= self.max_marking_area):
-                    filtered_count += 1
-            if filtered_count > 0:
-                print(f"  Filtered out {filtered_count} contours by area (min={self.min_marking_area}, max={self.max_marking_area})")
+                if area < self.min_marking_area:
+                    area_too_small += 1
+                elif area > self.max_marking_area:
+                    area_too_large += 1
+
+            total_filtered = area_too_small + area_too_large
+            if total_filtered > 0:
+                print(f"  Filtered: {area_too_small} too small (<{self.min_marking_area}), {area_too_large} too large (>{self.max_marking_area})")
+
+            # Show actual areas of first few contours for debugging
+            if len(contours) > 0:
+                areas = [cv2.contourArea(c) for c in contours[:5]]  # First 5 contours
+                print(f"  First 5 hole areas: {areas}")
 
         return markings
 
