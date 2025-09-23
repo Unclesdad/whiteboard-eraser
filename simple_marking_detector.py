@@ -188,9 +188,9 @@ class SimpleMarkingDetector:
         bottom_mask[bottom_boundary:, :] = white_surface_mask[bottom_boundary:, :]
 
         # Define kernels for each region
-        small_kernel = np.ones((7, 7), np.uint8)    # Small kernel for distant markings (top)
-        medium_kernel = np.ones((12, 12), np.uint8)  # Medium kernel for middle
-        large_kernel = np.ones((18, 18), np.uint8)   # Large kernel for close markings (bottom)
+        small_kernel = np.ones((5, 5), np.uint8)    # Small kernel for distant markings (top)
+        medium_kernel = np.ones((7, 7), np.uint8)   # Medium kernel for middle
+        large_kernel = np.ones((13, 13), np.uint8)  # Large kernel for close markings (bottom)
 
         # Process each region separately
         holes_combined = np.zeros_like(white_surface_mask)
@@ -279,7 +279,7 @@ class SimpleMarkingDetector:
             white_area = np.sum(white_surface_mask) / 255.0
             holes_area = np.sum(holes_combined) / 255.0
             contour_count = len(contours)
-            print(f"  Multi-scale detection: Top(7x7) Mid(12x12) Bot(18x18)")
+            print(f"  Multi-scale detection: Top(5x5) Mid(7x7) Bot(13x13)")
             print(f"  White surface: {white_area:.0f}px, Holes: {holes_area:.0f}px, Contours: {contour_count}")
 
             # Debug individual contours by region
