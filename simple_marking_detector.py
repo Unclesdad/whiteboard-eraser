@@ -362,7 +362,7 @@ class SimpleMarkingDetector:
 
         return car_markings
 
-    def visualize_detections(self, image: np.ndarray, markings: List[Marking]) -> np.ndarray:
+    def visualize_detections(self, image: np.ndarray, markings: List[Marking], whiteboard_mask: np.ndarray = None) -> np.ndarray:
         """Create debug visualization"""
         if not self.debug:
             return image
@@ -370,17 +370,23 @@ class SimpleMarkingDetector:
         # Correct image orientation
         vis_image = self.rotate_image_180(image.copy())
 
-        # Draw white surface boundary
-        if self.last_whiteboard_mask is not None:
+        # Draw white surface boundary - use provided mask or scale up the stored one
+        mask_to_use = whiteboard_mask if whiteboard_mask is not None else self.last_whiteboard_mask
+
+        if mask_to_use is not None:
+            # If mask resolution doesn't match image, scale it up
+            if mask_to_use.shape != vis_image.shape[:2]:
+                mask_to_use = cv2.resize(mask_to_use, (vis_image.shape[1], vis_image.shape[0]))
+
             # Find contours of the white surface
-            contours, _ = cv2.findContours(self.last_whiteboard_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(mask_to_use, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
                 # Draw the boundary of the largest white surface
                 largest_contour = max(contours, key=cv2.contourArea)
                 cv2.drawContours(vis_image, [largest_contour], -1, (0, 255, 255), 2)  # Yellow boundary
 
             # Add text
-            white_area = np.sum(self.last_whiteboard_mask) / 255.0
+            white_area = np.sum(mask_to_use) / 255.0
             cv2.putText(vis_image, f"White surface: {white_area:.0f}px",
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
