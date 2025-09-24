@@ -23,6 +23,10 @@ from simple_marking_detector import SimpleMarkingDetector
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 
+# Processing resolution (downscale for speed while keeping full FOV)
+PROCESSING_WIDTH = 1280
+PROCESSING_HEIGHT = 720
+
 PAGE = """\
 <html>
 <head>
@@ -88,10 +92,10 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         self.brightness_condition = Condition()
         self.surface_condition = Condition()
 
-        # Simple detection system - configure for specified resolution
+        # Simple detection system - configure for processing resolution
         self.detector = SimpleMarkingDetector(
-            image_width=CAMERA_WIDTH,
-            image_height=CAMERA_HEIGHT,
+            image_width=PROCESSING_WIDTH,
+            image_height=PROCESSING_HEIGHT,
             debug=True
         )
         self.detection_thread = None
@@ -132,9 +136,15 @@ class SimpleDetectionOutput(io.BufferedIOBase):
 
                     frame = self.raw_frame.copy()
 
-                # Run simple detection
+                # Downscale frame for faster processing while keeping full FOV
+                if frame.shape[1] != PROCESSING_WIDTH or frame.shape[0] != PROCESSING_HEIGHT:
+                    processing_frame = cv2.resize(frame, (PROCESSING_WIDTH, PROCESSING_HEIGHT))
+                else:
+                    processing_frame = frame
+
+                # Run simple detection on downscaled frame
                 start_time = time.time()
-                markings = self.detector.detect_markings(frame)
+                markings = self.detector.detect_markings(processing_frame)
                 detection_time = time.time() - start_time
 
                 # Update stats
@@ -143,16 +153,38 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                     detection_times.pop(0)
 
                 self.detection_fps = 1.0 / np.mean(detection_times) if detection_times else 0.0
-                self.current_markings = markings
 
-                # Create annotated frame
-                annotated_frame = self.detector.visualize_detections(frame, markings)
+                # Scale markings back to original resolution for visualization
+                scale_x = CAMERA_WIDTH / PROCESSING_WIDTH
+                scale_y = CAMERA_HEIGHT / PROCESSING_HEIGHT
+                scaled_markings = []
 
-                # Create brightness mask visualization
-                brightness_frame = self._create_brightness_visualization(frame)
+                for marking in markings:
+                    from simple_marking_detector import Marking
+                    scaled_marking = Marking(
+                        x=marking.x * scale_x,
+                        y=marking.y * scale_y,
+                        area=marking.area * scale_x * scale_y,
+                        confidence=marking.confidence,
+                        bbox=(int(marking.bbox[0] * scale_x),
+                              int(marking.bbox[1] * scale_y),
+                              int(marking.bbox[2] * scale_x),
+                              int(marking.bbox[3] * scale_y))
+                    )
+                    scaled_markings.append(scaled_marking)
 
-                # Create final surface visualization
-                surface_frame = self._create_surface_visualization(frame)
+                self.current_markings = scaled_markings
+
+                # Create annotated frame using original resolution
+                annotated_frame = self.detector.visualize_detections(frame, scaled_markings)
+
+                # Create brightness mask visualization using processing resolution
+                brightness_frame = self._create_brightness_visualization(processing_frame)
+                brightness_frame = cv2.resize(brightness_frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
+
+                # Create final surface visualization using processing resolution
+                surface_frame = self._create_surface_visualization(processing_frame)
+                surface_frame = cv2.resize(surface_frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
 
                 # Convert all three to JPEG
                 _, jpeg_data = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
