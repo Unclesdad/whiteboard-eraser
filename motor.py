@@ -471,11 +471,35 @@ class DualMotorController:
             standby_pin: GPIO pin for TB6612FNG standby control
         """
         self.standby_pin = standby_pin
-        
-        # Setup standby pin
-        GPIO.setup(self.standby_pin, GPIO.OUT)
-        self.enable()
-        
+
+        # Setup standby pin with error handling
+        try:
+            GPIO.setup(self.standby_pin, GPIO.OUT)
+            self.enable()
+            print(f"✓ Motor controller standby pin {standby_pin} configured")
+        except Exception as e:
+            print(f"❌ CRITICAL: Motor controller standby pin setup failed: {e}")
+
+            # Check if this is the SOC error and provide diagnostics
+            if "soc peripheral base address" in str(e).lower():
+                print("🔍 Same SOC error in DualMotorController - diagnostics:")
+
+                # Create a temporary N20Motor to trigger detailed diagnostics
+                # This will show the Pi model, GPIO version, etc.
+                try:
+                    # Use dummy pins just to trigger the diagnostics
+                    temp_motor = N20Motor(
+                        pwm_pin=18, dir1_pin=23, dir2_pin=24,
+                        enc_a_pin=17, enc_b_pin=27,
+                        name="Diagnostic Motor"
+                    )
+                except Exception:
+                    # The diagnostic output should have appeared above
+                    pass
+
+            print("\n🛑 Cannot operate motors without standby pin control")
+            raise RuntimeError("Motor controller GPIO initialization failed")
+
         # Motor instances (to be set by user)
         self.motor_a = None
         self.motor_b = None
