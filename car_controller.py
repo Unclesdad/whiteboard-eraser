@@ -199,11 +199,22 @@ class CarController:
         self.update_rate_hz = update_rate_hz
         self.update_interval = 1.0 / update_rate_hz
 
-        # Initialize GPIO
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
+        # Initialize GPIO (critical - robot cannot function without GPIO access)
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            self.hardware_available = True
+            print("✓ GPIO initialized successfully")
+        except Exception as e:
+            print(f"❌ CRITICAL: GPIO initialization failed: {e}")
+            print("🔧 Solutions:")
+            print("   - Run with: sudo python3 whiteboard_eraser_main.py")
+            print("   - Check if another process is using GPIO")
+            print("   - Verify you're running on a Raspberry Pi")
+            print("\n🛑 Cannot control hardware without GPIO access - stopping program")
+            raise RuntimeError("GPIO initialization failed - robot cannot access hardware")
 
-        # Initialize hardware
+        # Initialize hardware (will fall back to mock if GPIO failed)
         self._init_motors(left_motor_pins, right_motor_pins, standby_pin)
         self._init_servo(servo_pin)
         self._init_gyro(gyro_sda_pin, gyro_scl_pin)
@@ -239,6 +250,10 @@ class CarController:
         print(f"  Wheelbase: {wheelbase_mm}mm, Track: {track_width_mm}mm")
         print(f"  Max speed: {max_speed_mm_s}mm/s")
         print(f"  Update rate: {update_rate_hz}Hz")
+        if self.hardware_available:
+            print(f"  Hardware: Real GPIO detected")
+        else:
+            print(f"  Hardware: Using mock/simulation mode")
 
     def _init_motors(self, left_pins: dict, right_pins: dict, standby_pin: int):
         """Initialize motor controllers"""
@@ -261,10 +276,15 @@ class CarController:
             print("Motors initialized successfully")
 
         except Exception as e:
-            print(f"Error initializing motors: {e}")
-            self.left_motor = N20Motor()
-            self.right_motor = N20Motor()
-            self.motor_controller = DualMotorController()
+            print(f"❌ CRITICAL: Motor initialization failed: {e}")
+            print("🔧 This could be due to:")
+            print("   - Need to run with 'sudo python3 whiteboard_eraser_main.py'")
+            print("   - Motor drivers not connected to GPIO pins")
+            print("   - Incorrect wiring (check left_motor_pins and right_motor_pins)")
+            print("   - Hardware failure in motor drivers or Pi GPIO")
+            print("   - Wrong GPIO pin numbers in configuration")
+            print("\n🛑 Cannot operate robot without motors - stopping program")
+            raise RuntimeError("Motor hardware initialization failed - robot cannot function")
 
     def _init_servo(self, servo_pin: int):
         """Initialize steering servo"""
@@ -273,8 +293,13 @@ class CarController:
             self.servo.set_angle(90)  # Center position
             print("Servo initialized successfully")
         except Exception as e:
-            print(f"Error initializing servo: {e}")
-            self.servo = ServoController()
+            print(f"❌ CRITICAL: Servo initialization failed: {e}")
+            print("🔧 This could be due to:")
+            print(f"   - Servo not connected to GPIO pin {servo_pin}")
+            print("   - Incorrect servo wiring (check power, ground, signal)")
+            print("   - GPIO pin conflict or hardware failure")
+            print("\n🛑 Cannot steer robot without servo - stopping program")
+            raise RuntimeError("Servo hardware initialization failed - robot cannot steer")
 
     def _init_gyro(self, sda_pin: int, scl_pin: int):
         """Initialize gyroscope"""
@@ -284,8 +309,25 @@ class CarController:
             self.gyro.start_continuous_update(update_rate=50)
             print("Gyroscope initialized and calibrated")
         except Exception as e:
-            print(f"Error initializing gyroscope: {e}")
-            self.gyro = RCCarGyro()
+            print(f"⚠️  WARNING: Gyroscope initialization failed: {e}")
+            print("🔧 This could be due to:")
+            print(f"   - IMU not connected to I2C pins (SDA={sda_pin}, SCL={scl_pin})")
+            print("   - I2C not enabled (run 'sudo raspi-config' -> Interface Options -> I2C)")
+            print("   - Incorrect IMU wiring or hardware failure")
+            print("   - Wrong I2C address or conflicting I2C devices")
+            print("\n⚠️  Robot will operate with reduced accuracy (dead reckoning only)")
+
+            class MockGyro:
+                def __init__(self):
+                    self.angle_z = 0.0
+                    self.is_calibrated = True
+                def calibrate(self, samples=500, show_progress=False): pass
+                def start_continuous_update(self, update_rate=50): pass
+                def stop_continuous_update(self): pass
+                def get_orientation(self): return (0, 0, self.angle_z)
+                def reset_orientation(self): self.angle_z = 0.0
+
+            self.gyro = MockGyro()
 
     def _init_pid_controllers(self):
         """Initialize PID controllers"""
