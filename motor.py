@@ -98,7 +98,7 @@ class N20Motor:
         # Setup GPIO with diagnostics
         self._setup_gpio(pwm_frequency)
 
-        # Start shared encoder thread if this is the first motor
+        # Start shared encoder thread if this is the first motor (moved after device creation)
         with N20Motor._lock:
             if not N20Motor._running:
                 N20Motor._start_encoder_thread()
@@ -161,11 +161,7 @@ class N20Motor:
         Monitors all motor encoders simultaneously using quadrature decoding.
         Uses pre-created InputDevice objects for maximum speed.
         """
-        # Initialize last states for edge detection using pre-created devices
-        for motor_id in cls._encoder_devices.keys():
-            cls._encoder_last_states[motor_id] = cls._encoder_devices[motor_id]['pin_a'].value
-
-        print(f"✓ Encoder pins setup with gpiozero for {len(cls._encoder_devices)} motors")
+        print(f"✓ Encoder polling thread started for gpiozero devices")
 
         polling_interval = 1.0 / cls._polling_freq
         next_poll = time.perf_counter()
@@ -175,6 +171,12 @@ class N20Motor:
             for motor_id, encoder_devices in cls._encoder_devices.items():
                 a_state = encoder_devices['pin_a'].value
                 b_state = encoder_devices['pin_b'].value
+
+                # Initialize last state if this is a new motor
+                if motor_id not in cls._encoder_last_states:
+                    cls._encoder_last_states[motor_id] = a_state
+                    continue
+
                 last_a = cls._encoder_last_states[motor_id]
 
                 # Process encoder changes using optimized quadrature decoding (exact same logic as working version)
