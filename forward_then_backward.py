@@ -8,7 +8,6 @@ One motor is inverted to simulate differential drive setup.
 import time
 import sys
 import os
-import RPi.GPIO as GPIO
 
 # Try to import N20Motor with better error handling
 try:
@@ -23,9 +22,7 @@ def main():
     print("=== Forward Then Backward N20 Motor Test ===")
     print("Setting up dual motor controller...")
     
-    # Setup GPIO
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
+    # gpiozero handles GPIO setup automatically
     
     try:
         # Create dual motor controller with standby pin
@@ -159,7 +156,7 @@ def main():
             if 'controller' in locals():
                 controller.cleanup()
             time.sleep(0.5)
-            GPIO.cleanup()
+            # gpiozero handles cleanup automatically
         except Exception as e:
             print(f"Cleanup error: {e}")
         
