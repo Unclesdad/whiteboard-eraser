@@ -277,12 +277,34 @@ class CarController:
 
         except Exception as e:
             print(f"❌ CRITICAL: Motor initialization failed: {e}")
-            print("🔧 This could be due to:")
-            print("   - Need to run with 'sudo python3 whiteboard_eraser_main.py'")
-            print("   - Motor drivers not connected to GPIO pins")
-            print("   - Incorrect wiring (check left_motor_pins and right_motor_pins)")
-            print("   - Hardware failure in motor drivers or Pi GPIO")
-            print("   - Wrong GPIO pin numbers in configuration")
+
+            # Check if this is the specific SOC error that needs detailed diagnosis
+            if "soc peripheral base address" in str(e).lower():
+                print("\n🔍 Running detailed hardware diagnostics...")
+
+                # Try to create a temporary motor instance to get the detailed diagnostics
+                try:
+                    temp_motor = N20Motor(
+                        pwm_pin=left_pins['pwm_pin'],
+                        dir1_pin=left_pins['dir1_pin'],
+                        dir2_pin=left_pins['dir2_pin'],
+                        enc_a_pin=left_pins['enc_a_pin'],
+                        enc_b_pin=left_pins['enc_b_pin'],
+                        name="Diagnostic Motor"
+                    )
+                except Exception as motor_error:
+                    # This should trigger the detailed diagnostics in motor.py
+                    print(f"(Diagnostic attempt also failed, which provided the above details)")
+
+            else:
+                # For other errors, show the generic troubleshooting
+                print("🔧 This could be due to:")
+                print("   - Need to run with 'sudo python3 whiteboard_eraser_main.py'")
+                print("   - Motor drivers not connected to GPIO pins")
+                print("   - Incorrect wiring (check left_motor_pins and right_motor_pins)")
+                print("   - Hardware failure in motor drivers or Pi GPIO")
+                print("   - Wrong GPIO pin numbers in configuration")
+
             print("\n🛑 Cannot operate robot without motors - stopping program")
             raise RuntimeError("Motor hardware initialization failed - robot cannot function")
 
