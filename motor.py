@@ -13,6 +13,8 @@ Motor Specifications:
 import RPi.GPIO as GPIO
 import threading
 import time
+import os
+import re
 
 class N20Motor:
     def __init__(self, pwm_pin, dir1_pin, dir2_pin, enc_a_pin, enc_b_pin, 
@@ -45,30 +47,60 @@ class N20Motor:
         # Motor state
         self.current_speed = 0.0  # -1.0 to 1.0
         
-        # Setup GPIO
+        # Setup GPIO with diagnostics
         self._setup_gpio(pwm_frequency)
         
         # Setup encoder interrupts
         self._setup_encoder_interrupts()
         
     def _setup_gpio(self, pwm_frequency):
-        """Setup GPIO pins for motor control"""
-        # Setup motor control pins
-        GPIO.setup(self.pwm_pin, GPIO.OUT)
-        GPIO.setup(self.dir1_pin, GPIO.OUT)
-        GPIO.setup(self.dir2_pin, GPIO.OUT)
-        
-        # Setup PWM
-        self.pwm = GPIO.PWM(self.pwm_pin, pwm_frequency)
-        self.pwm.start(0)
-        
-        # Setup encoder pins
-        GPIO.setup(self.enc_a_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(self.enc_b_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        
-        # Read initial encoder states
-        self.last_a_state = GPIO.input(self.enc_a_pin)
-        self.last_b_state = GPIO.input(self.enc_b_pin)
+        """Setup GPIO pins for motor control with hardware diagnostics"""
+        print(f"🔧 Setting up GPIO for {self.name}...")
+
+        # Add hardware diagnostics
+        self._print_hardware_info()
+
+        try:
+            # Setup motor control pins
+            print(f"  Setting up motor pins: PWM={self.pwm_pin}, DIR1={self.dir1_pin}, DIR2={self.dir2_pin}")
+            GPIO.setup(self.pwm_pin, GPIO.OUT)
+            GPIO.setup(self.dir1_pin, GPIO.OUT)
+            GPIO.setup(self.dir2_pin, GPIO.OUT)
+
+            # Setup PWM
+            print(f"  Starting PWM at {pwm_frequency}Hz on pin {self.pwm_pin}")
+            self.pwm = GPIO.PWM(self.pwm_pin, pwm_frequency)
+            self.pwm.start(0)
+
+            # Setup encoder pins
+            print(f"  Setting up encoder pins: A={self.enc_a_pin}, B={self.enc_b_pin}")
+            GPIO.setup(self.enc_a_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(self.enc_b_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+            # Read initial encoder states
+            self.last_a_state = GPIO.input(self.enc_a_pin)
+            self.last_b_state = GPIO.input(self.enc_b_pin)
+            print(f"  Initial encoder states: A={self.last_a_state}, B={self.last_b_state}")
+
+            print(f"✓ {self.name} GPIO setup complete")
+
+        except Exception as e:
+            print(f"❌ GPIO setup failed for {self.name}: {e}")
+            print("🔍 Hardware diagnosis:")
+            self._diagnose_gpio_failure(e)
+
+            # Try fallback methods
+            if "soc peripheral base address" in str(e).lower():
+                fallback_success = self._try_fallback_gpio_init()
+                if not fallback_success:
+                    print("\n🛑 All GPIO initialization methods failed")
+                    print("🔧 Manual steps to try:")
+                    print("   1. pip3 install --upgrade RPi.GPIO")
+                    print("   2. pip3 install gpiozero (modern alternative)")
+                    print("   3. Check Pi model compatibility")
+                    print("   4. Verify hardware connections")
+
+            raise
         
     def _setup_encoder_interrupts(self):
         """Setup interrupt handlers for encoder"""
@@ -229,6 +261,133 @@ class N20Motor:
         """Stop the motor"""
         self.set(0)
     
+    def _print_hardware_info(self):
+        """Print Raspberry Pi hardware information for diagnostics"""
+        print("🔍 Raspberry Pi Hardware Detection:")
+
+        # Try to read Pi model from device tree
+        pi_model = self._get_pi_model()
+        print(f"  Pi Model: {pi_model}")
+
+        # Check RPi.GPIO version
+        try:
+            import RPi.GPIO as GPIO_check
+            gpio_version = getattr(GPIO_check, 'VERSION', 'Unknown')
+            print(f"  RPi.GPIO Version: {gpio_version}")
+        except:
+            print(f"  RPi.GPIO Version: Detection failed")
+
+        # Check kernel version
+        try:
+            with open('/proc/version', 'r') as f:
+                kernel = f.read().split()[2]
+                print(f"  Kernel: {kernel}")
+        except:
+            print(f"  Kernel: Detection failed")
+
+    def _get_pi_model(self):
+        """Detect Raspberry Pi model"""
+        try:
+            # First try device tree
+            if os.path.exists('/proc/device-tree/model'):
+                with open('/proc/device-tree/model', 'r') as f:
+                    return f.read().strip('\x00')
+        except:
+            pass
+
+        try:
+            # Fallback to /proc/cpuinfo
+            with open('/proc/cpuinfo', 'r') as f:
+                for line in f:
+                    if line.startswith('Model'):
+                        return line.split(':', 1)[1].strip()
+        except:
+            pass
+
+        return "Unknown Pi Model"
+
+    def _diagnose_gpio_failure(self, error):
+        """Provide specific diagnosis for GPIO failures"""
+        error_str = str(error).lower()
+
+        if "soc peripheral base address" in error_str:
+            print("  ⚠️  SOC peripheral base address error detected")
+            print("  🔧 This means RPi.GPIO can't detect your Pi hardware")
+            print("  💡 Possible solutions:")
+            print("     - Update RPi.GPIO: pip3 install --upgrade RPi.GPIO")
+            print("     - Check Pi model compatibility with RPi.GPIO version")
+            print("     - Try alternative: pip3 install gpiozero")
+            print("     - Verify /proc/cpuinfo and /proc/device-tree/model exist")
+
+            # Show what hardware was detected
+            pi_model = self._get_pi_model()
+            print(f"     - Detected model: {pi_model}")
+
+            # Check if it's a known incompatible combination
+            if "pi 5" in pi_model.lower():
+                print("     ⚠️  Raspberry Pi 5 requires RPi.GPIO >= 0.7.1 or gpiozero")
+            elif "pi zero 2" in pi_model.lower():
+                print("     ⚠️  Pi Zero 2 W requires recent RPi.GPIO version")
+
+        elif "permission denied" in error_str:
+            print("  ⚠️  Permission denied - need sudo access")
+            print("  🔧 Run with: sudo python3 your_script.py")
+
+        elif "device or resource busy" in error_str:
+            print("  ⚠️  GPIO pins already in use by another process")
+            print("  🔧 Check for other running programs using GPIO")
+
+        else:
+            print(f"  ❓ Unrecognized error pattern: {error}")
+            print("  🔧 Try checking wiring and pin numbers")
+
+    def _try_fallback_gpio_init(self):
+        """Try alternative GPIO initialization methods"""
+        print("🔄 Attempting fallback GPIO initialization...")
+
+        # Method 1: Try importing gpiozero as alternative
+        try:
+            print("  Trying gpiozero library...")
+            import gpiozero
+            print("  ✓ gpiozero available - consider switching to gpiozero for better compatibility")
+            # Don't actually switch here, just report availability
+            return False  # Still want to try other RPi.GPIO fixes
+        except ImportError:
+            print("  ⚠️  gpiozero not available")
+
+        # Method 2: Try manual Pi detection and GPIO base setup
+        pi_model = self._get_pi_model()
+        print(f"  Attempting manual GPIO setup for: {pi_model}")
+
+        if "pi 5" in pi_model.lower():
+            print("  ⚠️  Raspberry Pi 5 detected - RPi.GPIO may not be fully supported")
+            print("  💡 Consider using gpiozero: pip3 install gpiozero")
+            return False
+
+        # Method 3: Check if we can read basic Pi info that RPi.GPIO needs
+        try:
+            # Check /proc/cpuinfo for hardware info RPi.GPIO uses
+            with open('/proc/cpuinfo', 'r') as f:
+                cpuinfo = f.read()
+                if 'Hardware' in cpuinfo:
+                    hardware_line = [line for line in cpuinfo.split('\n') if line.startswith('Hardware')]
+                    if hardware_line:
+                        hardware = hardware_line[0].split(':')[1].strip()
+                        print(f"  Hardware identifier: {hardware}")
+
+                        # Common hardware identifiers
+                        if hardware in ['BCM2835', 'BCM2836', 'BCM2837', 'BCM2711']:
+                            print(f"  ✓ Recognized hardware: {hardware}")
+                            return True  # This should work with RPi.GPIO
+                        else:
+                            print(f"  ⚠️  Unrecognized hardware: {hardware}")
+
+        except Exception as e:
+            print(f"  ❌ Failed to read hardware info: {e}")
+
+        print("  ❌ No successful fallback method found")
+        return False
+
     def cleanup(self):
         """Clean up GPIO and PWM"""
         try:
@@ -237,7 +396,7 @@ class N20Motor:
             self.pwm.stop()
         except:
             pass
-        
+
         try:
             GPIO.remove_event_detect(self.enc_a_pin)
         except:
