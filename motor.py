@@ -15,9 +15,23 @@ import threading
 import time
 import os
 import re
+import atexit
+import signal
+import sys
+import numpy as np
 
 class N20Motor:
-    def __init__(self, pwm_pin, dir1_pin, dir2_pin, enc_a_pin, enc_b_pin, 
+    # Class-level shared resources for high-speed encoder management
+    _encoder_thread = None
+    _encoder_positions = {}
+    _encoder_pins = {}
+    _encoder_last_states = {}
+    _running = False
+    _lock = threading.Lock()
+    _motor_count = 0
+    _polling_freq = 7500  # 7.5 kHz polling frequency for reliable encoder reading
+
+    def __init__(self, pwm_pin, dir1_pin, dir2_pin, enc_a_pin, enc_b_pin,
                  pwm_frequency=1000, name="Motor"):
         """
         Initialize N20 motor with encoder
@@ -37,21 +51,27 @@ class N20Motor:
         self.enc_a_pin = enc_a_pin
         self.enc_b_pin = enc_b_pin
         self.name = name
-        
-        # Encoder state
-        self.encoder_count = 0
-        self.last_a_state = 0
-        self.last_b_state = 0
-        self._encoder_lock = threading.Lock()
-        
+
+        # Register this motor with shared encoder system
+        with N20Motor._lock:
+            self.motor_id = N20Motor._motor_count
+            N20Motor._motor_count += 1
+            N20Motor._encoder_pins[self.motor_id] = (enc_a_pin, enc_b_pin)
+            N20Motor._encoder_positions[self.motor_id] = 0
+
         # Motor state
         self.current_speed = 0.0  # -1.0 to 1.0
         
         # Setup GPIO with diagnostics
         self._setup_gpio(pwm_frequency)
-        
-        # Setup encoder interrupts
-        self._setup_encoder_interrupts()
+
+        # Start shared encoder thread if this is the first motor
+        with N20Motor._lock:
+            if not N20Motor._running:
+                N20Motor._start_encoder_thread()
+
+        # Setup cleanup handlers
+        self._setup_cleanup_handlers()
         
     def _setup_gpio(self, pwm_frequency):
         """Setup GPIO pins for motor control with hardware diagnostics"""
@@ -72,15 +92,8 @@ class N20Motor:
             self.pwm = GPIO.PWM(self.pwm_pin, pwm_frequency)
             self.pwm.start(0)
 
-            # Setup encoder pins
-            print(f"  Setting up encoder pins: A={self.enc_a_pin}, B={self.enc_b_pin}")
-            GPIO.setup(self.enc_a_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(self.enc_b_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-            # Read initial encoder states
-            self.last_a_state = GPIO.input(self.enc_a_pin)
-            self.last_b_state = GPIO.input(self.enc_b_pin)
-            print(f"  Initial encoder states: A={self.last_a_state}, B={self.last_b_state}")
+            # Note: Encoder pins will be setup by shared encoder thread
+            print(f"  Encoder pins A={self.enc_a_pin}, B={self.enc_b_pin} registered for high-speed polling")
 
             print(f"✓ {self.name} GPIO setup complete")
 
@@ -102,85 +115,89 @@ class N20Motor:
 
             raise
         
-    def _setup_encoder_interrupts(self):
-        """Setup interrupt handlers for encoder"""
-        # Remove any existing event detection first
-        try:
-            GPIO.remove_event_detect(self.enc_a_pin)
-            GPIO.remove_event_detect(self.enc_b_pin)
-        except:
-            pass
-        
-        # Add event detection with minimal bouncetime for better responsiveness
-        GPIO.add_event_detect(self.enc_a_pin, GPIO.BOTH, 
-                            callback=self._encoder_callback, bouncetime=1)
-        GPIO.add_event_detect(self.enc_b_pin, GPIO.BOTH, 
-                            callback=self._encoder_callback, bouncetime=1)
+    @classmethod
+    def _start_encoder_thread(cls):
+        """Start the shared encoder polling thread at 7500Hz."""
+        cls._running = True
+        cls._encoder_thread = threading.Thread(target=cls._encoder_loop, daemon=True)
+        cls._encoder_thread.start()
+        print(f"✓ High-speed encoder polling started at {cls._polling_freq}Hz")
+
+    @classmethod
+    def _encoder_loop(cls):
+        """
+        High-speed encoder polling loop running at 7500Hz.
+        Monitors all motor encoders simultaneously using quadrature decoding.
+        """
+        # Setup GPIO mode for encoder thread
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+
+        # Setup all encoder pins
+        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
+            GPIO.setup(pin_a, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(pin_b, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+        # Initialize last states for edge detection
+        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
+            cls._encoder_last_states[motor_id] = GPIO.input(pin_a)
+
+        polling_interval = 1.0 / cls._polling_freq
+        next_poll = time.perf_counter()
+
+        while cls._running:
+            # Ultra-fast encoder reading for all motors
+            for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
+                a_state = GPIO.input(pin_a)
+                b_state = GPIO.input(pin_b)
+                last_a = cls._encoder_last_states[motor_id]
+
+                # Process encoder changes using optimized quadrature decoding
+                if a_state != last_a:
+                    if a_state == b_state:
+                        cls._encoder_positions[motor_id] += 1
+                    else:
+                        cls._encoder_positions[motor_id] -= 1
+                    cls._encoder_last_states[motor_id] = a_state
+
+            # Precise timing control
+            next_poll += polling_interval
+            sleep_time = next_poll - time.perf_counter()
+
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    def _setup_cleanup_handlers(self):
+        """Setup cleanup handlers for graceful shutdown"""
+        def cleanup_handler(signum, frame):
+            N20Motor._running = False
+            if N20Motor._encoder_thread:
+                N20Motor._encoder_thread.join(timeout=1.0)
+            GPIO.cleanup()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, cleanup_handler)
+        atexit.register(lambda: (setattr(N20Motor, '_running', False), GPIO.cleanup()))
     
-    def _encoder_callback(self, channel):
+    def set(self, power):
         """
-        Encoder interrupt callback for quadrature decoding
-        Uses standard quadrature decoding logic with improved state tracking
-        """
-        with self._encoder_lock:
-            a_state = GPIO.input(self.enc_a_pin)
-            b_state = GPIO.input(self.enc_b_pin)
-            
-            # Only process if this is actually a state change
-            if channel == self.enc_a_pin and a_state != self.last_a_state:
-                # A channel changed
-                if (self.last_a_state == 0 and a_state == 1):
-                    # Rising edge on A
-                    if b_state == 0:
-                        self.encoder_count += 1  # Forward
-                    else:
-                        self.encoder_count -= 1  # Reverse
-                elif (self.last_a_state == 1 and a_state == 0):
-                    # Falling edge on A
-                    if b_state == 1:
-                        self.encoder_count += 1  # Forward
-                    else:
-                        self.encoder_count -= 1  # Reverse
-                self.last_a_state = a_state
-                
-            elif channel == self.enc_b_pin and b_state != self.last_b_state:
-                # B channel changed
-                if (self.last_b_state == 0 and b_state == 1):
-                    # Rising edge on B
-                    if a_state == 1:
-                        self.encoder_count += 1  # Forward
-                    else:
-                        self.encoder_count -= 1  # Reverse
-                elif (self.last_b_state == 1 and b_state == 0):
-                    # Falling edge on B
-                    if a_state == 0:
-                        self.encoder_count += 1  # Forward
-                    else:
-                        self.encoder_count -= 1  # Reverse
-                self.last_b_state = b_state
-    
-    def set(self, speed):
-        """
-        Set motor speed and direction
-        
+        Set motor power and direction (cleaner implementation from old version).
+
         Args:
-            speed: Float from -1.0 to 1.0
-                  -1.0 = full speed reverse
-                   0.0 = stop
-                   1.0 = full speed forward
+            power: Motor power from -1.0 to 1.0 (negative = reverse)
         """
-        # Clamp speed to valid range
-        speed = max(-1.0, min(1.0, speed))
-        self.current_speed = speed
-        
-        # Calculate PWM duty cycle (0-100%)
-        duty_cycle = abs(speed) * 100
-        
-        if speed > 0:
+        # Clamp power to valid range
+        power = min(max(power, -1), 1)
+        self.current_speed = power
+
+        # Determine direction using numpy sign
+        sign = np.sign(power)
+
+        if sign == 1:
             # Forward direction
             GPIO.output(self.dir1_pin, GPIO.HIGH)
             GPIO.output(self.dir2_pin, GPIO.LOW)
-        elif speed < 0:
+        elif sign == -1:
             # Reverse direction
             GPIO.output(self.dir1_pin, GPIO.LOW)
             GPIO.output(self.dir2_pin, GPIO.HIGH)
@@ -188,34 +205,56 @@ class N20Motor:
             # Stop (brake)
             GPIO.output(self.dir1_pin, GPIO.LOW)
             GPIO.output(self.dir2_pin, GPIO.LOW)
-        
-        # Set PWM duty cycle
-        self.pwm.ChangeDutyCycle(duty_cycle)
+
+        # Set PWM duty cycle (absolute value)
+        self.pwm.ChangeDutyCycle(abs(power * 100))
     
     def get_encoder_count(self):
         """
-        Get current encoder count
-        
+        Get current encoder position from shared high-speed polling system.
+
         Returns:
-            int: Current encoder count (can be negative)
+            int: Current encoder count (positive = forward, negative = reverse)
         """
-        with self._encoder_lock:
-            return self.encoder_count
-    
+        with N20Motor._lock:
+            return N20Motor._encoder_positions.get(self.motor_id, 0)
+
     def reset_encoder(self):
-        """Reset encoder count to zero"""
-        with self._encoder_lock:
-            self.encoder_count = 0
+        """Reset encoder position to zero."""
+        with N20Motor._lock:
+            N20Motor._encoder_positions[self.motor_id] = 0
+
+    def get_position(self):
+        """Alias for get_encoder_count for compatibility with old interface"""
+        return self.get_encoder_count()
+
+    def reset_position(self):
+        """Alias for reset_encoder for compatibility with old interface"""
+        return self.reset_encoder()
     
     def get_revolutions(self):
         """
         Get motor shaft revolutions based on encoder count
-        
+
         Returns:
             float: Number of revolutions (28 counts = 1 revolution for 7 PPR quadrature)
         """
-        with self._encoder_lock:
-            return self.encoder_count / 28.0
+        return self.get_encoder_count() / 28.0
+
+    def get_speed_cps(self, window_time=0.5):
+        """
+        Calculate motor speed by measuring position change over time.
+
+        Args:
+            window_time: Time window in seconds for speed calculation
+
+        Returns:
+            float: Speed in encoder counts per second
+        """
+        start_pos = self.get_encoder_count()
+        time.sleep(window_time)
+        end_pos = self.get_encoder_count()
+        return (end_pos - start_pos) / window_time
     
     def get_speed(self):
         """
@@ -228,33 +267,39 @@ class N20Motor:
     
     def get_encoder_states(self):
         """
-        Get current encoder pin states for debugging
-        
+        Get current encoder pin states for debugging (updated for shared system)
+
         Returns:
-            tuple: (A_state, B_state, last_A_state, last_B_state)
+            tuple: (A_state, B_state, last_A_state, encoder_position)
         """
-        with self._encoder_lock:
-            current_a = GPIO.input(self.enc_a_pin)
-            current_b = GPIO.input(self.enc_b_pin)
-            return (current_a, current_b, self.last_a_state, self.last_b_state)
+        current_a = GPIO.input(self.enc_a_pin)
+        current_b = GPIO.input(self.enc_b_pin)
+
+        with N20Motor._lock:
+            last_a = N20Motor._encoder_last_states.get(self.motor_id, 0)
+            position = N20Motor._encoder_positions.get(self.motor_id, 0)
+
+        return (current_a, current_b, last_a, position)
     
     def get_status(self):
         """
-        Get comprehensive motor status for debugging
-        
+        Get comprehensive motor status for debugging (updated for shared system)
+
         Returns:
             dict: Motor status information
         """
-        a_state, b_state, last_a, last_b = self.get_encoder_states()
+        a_state, b_state, last_a, position = self.get_encoder_states()
         return {
             'name': self.name,
+            'motor_id': self.motor_id,
             'speed': self.current_speed,
             'encoder_count': self.get_encoder_count(),
             'revolutions': self.get_revolutions(),
             'encoder_a_current': a_state,
             'encoder_b_current': b_state,
             'encoder_a_last': last_a,
-            'encoder_b_last': last_b
+            'position_from_shared': position,
+            'polling_frequency': N20Motor._polling_freq
         }
     
     def stop(self):
@@ -389,7 +434,7 @@ class N20Motor:
         return False
 
     def cleanup(self):
-        """Clean up GPIO and PWM"""
+        """Clean up GPIO and PWM (updated for polling system)"""
         try:
             self.stop()
             time.sleep(0.1)  # Give time for PWM to stop
@@ -397,14 +442,8 @@ class N20Motor:
         except:
             pass
 
-        try:
-            GPIO.remove_event_detect(self.enc_a_pin)
-        except:
-            pass
-        try:
-            GPIO.remove_event_detect(self.enc_b_pin)
-        except:
-            pass
+        # Encoder cleanup is handled by shared thread
+        # No individual interrupt cleanup needed
 
 
 class DualMotorController:
