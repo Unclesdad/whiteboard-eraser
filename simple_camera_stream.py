@@ -19,6 +19,10 @@ from picamera2.outputs import FileOutput
 # Import our simple marking detector
 from simple_marking_detector import SimpleMarkingDetector
 
+# Configuration - change resolution here
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
+
 PAGE = """\
 <html>
 <head>
@@ -84,8 +88,12 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         self.brightness_condition = Condition()
         self.surface_condition = Condition()
 
-        # Simple detection system
-        self.detector = SimpleMarkingDetector(debug=True)
+        # Simple detection system - configure for specified resolution
+        self.detector = SimpleMarkingDetector(
+            image_width=CAMERA_WIDTH,
+            image_height=CAMERA_HEIGHT,
+            debug=True
+        )
         self.detection_thread = None
         self.detection_running = False
         self.current_markings = []
@@ -350,8 +358,9 @@ def main():
         picam2 = Picamera2(camera_num=0)
 
         # Create configuration with manual controls
-        config = picam2.create_video_configuration(main={"size": (640, 480)})
+        config = picam2.create_video_configuration(main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT)})
         picam2.configure(config)
+        print(f"✓ Camera configured for {CAMERA_WIDTH}x{CAMERA_HEIGHT} resolution")
 
         # Set manual camera controls for consistent brightness
         controls = {
