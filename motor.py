@@ -10,7 +10,8 @@ Motor Specifications:
 - Magnetic Hall encoder with A/B phases
 """
 
-import RPi.GPIO as GPIO
+from gpiozero import PWMOutputDevice, OutputDevice, InputDevice, Device
+from gpiozero.pins.pigpio import PiGPIOFactory
 import threading
 import time
 import os
@@ -19,6 +20,14 @@ import atexit
 import signal
 import sys
 import numpy as np
+
+# Use pigpio for better performance and Pi 5 compatibility
+try:
+    Device.pin_factory = PiGPIOFactory()
+    print("✓ Using pigpio pin factory for better performance")
+except Exception as e:
+    print(f"⚠️  pigpio not available ({e}), using default pin factory")
+    # Default pin factory will be used
 
 class N20Motor:
     # Class-level shared resources for high-speed encoder management
@@ -70,7 +79,14 @@ class N20Motor:
             print(f"  Note: use_interrupts parameter ignored - using high-speed polling at {N20Motor._polling_freq}Hz")
         if reverse_encoder:
             print(f"  {self.name}: Encoder direction reversed")
-        
+
+        # Initialize gpiozero devices
+        self.pwm_device = None
+        self.dir1_device = None
+        self.dir2_device = None
+        self.enc_a_device = None
+        self.enc_b_device = None
+
         # Setup GPIO with diagnostics
         self._setup_gpio(pwm_frequency)
 
@@ -83,44 +99,42 @@ class N20Motor:
         self._setup_cleanup_handlers()
         
     def _setup_gpio(self, pwm_frequency):
-        """Setup GPIO pins for motor control with hardware diagnostics"""
-        print(f"🔧 Setting up GPIO for {self.name}...")
-
-        # Add hardware diagnostics
-        self._print_hardware_info()
+        """Setup GPIO pins for motor control using gpiozero"""
+        print(f"🔧 Setting up gpiozero devices for {self.name}...")
 
         try:
-            # Setup motor control pins
+            # Setup motor control devices
             print(f"  Setting up motor pins: PWM={self.pwm_pin}, DIR1={self.dir1_pin}, DIR2={self.dir2_pin}")
-            GPIO.setup(self.pwm_pin, GPIO.OUT)
-            GPIO.setup(self.dir1_pin, GPIO.OUT)
-            GPIO.setup(self.dir2_pin, GPIO.OUT)
 
-            # Setup PWM
-            print(f"  Starting PWM at {pwm_frequency}Hz on pin {self.pwm_pin}")
-            self.pwm = GPIO.PWM(self.pwm_pin, pwm_frequency)
-            self.pwm.start(0)
+            # Create PWM device for speed control
+            self.pwm_device = PWMOutputDevice(self.pwm_pin, frequency=pwm_frequency)
+
+            # Create output devices for direction control
+            self.dir1_device = OutputDevice(self.dir1_pin)
+            self.dir2_device = OutputDevice(self.dir2_pin)
+
+            # Initialize to stopped state
+            self.pwm_device.value = 0
+            self.dir1_device.off()
+            self.dir2_device.off()
+
+            print(f"  PWM device created at {pwm_frequency}Hz on pin {self.pwm_pin}")
 
             # Note: Encoder pins will be setup by shared encoder thread
             print(f"  Encoder pins A={self.enc_a_pin}, B={self.enc_b_pin} registered for high-speed polling")
 
-            print(f"✓ {self.name} GPIO setup complete")
+            print(f"✓ {self.name} gpiozero setup complete")
 
         except Exception as e:
-            print(f"❌ GPIO setup failed for {self.name}: {e}")
-            print("🔍 Hardware diagnosis:")
-            self._diagnose_gpio_failure(e)
+            print(f"❌ gpiozero setup failed for {self.name}: {e}")
+            print("🔧 This could be due to:")
+            print("   - gpiozero not installed: pip3 install gpiozero")
+            print("   - GPIO pins already in use")
+            print("   - Hardware connection issues")
+            print("   - Insufficient permissions (try with sudo)")
 
-            # Try fallback methods
-            if "soc peripheral base address" in str(e).lower():
-                fallback_success = self._try_fallback_gpio_init()
-                if not fallback_success:
-                    print("\n🛑 All GPIO initialization methods failed")
-                    print("🔧 Manual steps to try:")
-                    print("   1. pip3 install --upgrade RPi.GPIO")
-                    print("   2. pip3 install gpiozero (modern alternative)")
-                    print("   3. Check Pi model compatibility")
-                    print("   4. Verify hardware connections")
+            # Add hardware diagnostics
+            self._print_hardware_info()
 
             raise
         
@@ -135,46 +149,60 @@ class N20Motor:
     @classmethod
     def _encoder_loop(cls):
         """
-        High-speed encoder polling loop running at 7500Hz.
+        High-speed encoder polling loop running at 7500Hz using gpiozero.
         Monitors all motor encoders simultaneously using quadrature decoding.
         """
-        # Setup GPIO mode for encoder thread
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-
-        # Setup all encoder pins
+        # Setup all encoder pins using gpiozero
+        encoder_devices = {}
         for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-            GPIO.setup(pin_a, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(pin_b, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            encoder_devices[motor_id] = {
+                'pin_a': InputDevice(pin_a, pull_up=True),
+                'pin_b': InputDevice(pin_b, pull_up=True)
+            }
 
         # Initialize last states for edge detection
-        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-            cls._encoder_last_states[motor_id] = GPIO.input(pin_a)
+        for motor_id in cls._encoder_pins.keys():
+            cls._encoder_last_states[motor_id] = encoder_devices[motor_id]['pin_a'].value
+
+        print(f"✓ Encoder devices created for {len(encoder_devices)} motors")
 
         polling_interval = 1.0 / cls._polling_freq
         next_poll = time.perf_counter()
 
-        while cls._running:
-            # Ultra-fast encoder reading for all motors
-            for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-                a_state = GPIO.input(pin_a)
-                b_state = GPIO.input(pin_b)
-                last_a = cls._encoder_last_states[motor_id]
+        try:
+            while cls._running:
+                # Ultra-fast encoder reading for all motors
+                for motor_id in cls._encoder_pins.keys():
+                    pin_a_device = encoder_devices[motor_id]['pin_a']
+                    pin_b_device = encoder_devices[motor_id]['pin_b']
 
-                # Process encoder changes using optimized quadrature decoding
-                if a_state != last_a:
-                    if a_state == b_state:
-                        cls._encoder_positions[motor_id] += 1
-                    else:
-                        cls._encoder_positions[motor_id] -= 1
-                    cls._encoder_last_states[motor_id] = a_state
+                    a_state = pin_a_device.value
+                    b_state = pin_b_device.value
+                    last_a = cls._encoder_last_states[motor_id]
 
-            # Precise timing control
-            next_poll += polling_interval
-            sleep_time = next_poll - time.perf_counter()
+                    # Process encoder changes using optimized quadrature decoding
+                    if a_state != last_a:
+                        if a_state == b_state:
+                            cls._encoder_positions[motor_id] += 1
+                        else:
+                            cls._encoder_positions[motor_id] -= 1
+                        cls._encoder_last_states[motor_id] = a_state
 
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                # Precise timing control
+                next_poll += polling_interval
+                sleep_time = next_poll - time.perf_counter()
+
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        finally:
+            # Clean up encoder devices
+            for motor_id in encoder_devices:
+                try:
+                    encoder_devices[motor_id]['pin_a'].close()
+                    encoder_devices[motor_id]['pin_b'].close()
+                except:
+                    pass
 
     def _setup_cleanup_handlers(self):
         """Setup cleanup handlers for graceful shutdown"""
@@ -182,15 +210,15 @@ class N20Motor:
             N20Motor._running = False
             if N20Motor._encoder_thread:
                 N20Motor._encoder_thread.join(timeout=1.0)
-            GPIO.cleanup()
+            # gpiozero devices will be cleaned up by their own close() methods
             sys.exit(0)
 
         signal.signal(signal.SIGINT, cleanup_handler)
-        atexit.register(lambda: (setattr(N20Motor, '_running', False), GPIO.cleanup()))
+        atexit.register(lambda: setattr(N20Motor, '_running', False))
     
     def set(self, power):
         """
-        Set motor power and direction (cleaner implementation from old version).
+        Set motor power and direction using gpiozero devices.
 
         Args:
             power: Motor power from -1.0 to 1.0 (negative = reverse)
@@ -204,19 +232,19 @@ class N20Motor:
 
         if sign == 1:
             # Forward direction
-            GPIO.output(self.dir1_pin, GPIO.HIGH)
-            GPIO.output(self.dir2_pin, GPIO.LOW)
+            self.dir1_device.on()
+            self.dir2_device.off()
         elif sign == -1:
             # Reverse direction
-            GPIO.output(self.dir1_pin, GPIO.LOW)
-            GPIO.output(self.dir2_pin, GPIO.HIGH)
+            self.dir1_device.off()
+            self.dir2_device.on()
         else:
             # Stop (brake)
-            GPIO.output(self.dir1_pin, GPIO.LOW)
-            GPIO.output(self.dir2_pin, GPIO.LOW)
+            self.dir1_device.off()
+            self.dir2_device.off()
 
-        # Set PWM duty cycle (absolute value)
-        self.pwm.ChangeDutyCycle(abs(power * 100))
+        # Set PWM value (0.0 to 1.0)
+        self.pwm_device.value = abs(power)
     
     def get_encoder_count(self):
         """
@@ -277,13 +305,25 @@ class N20Motor:
     
     def get_encoder_states(self):
         """
-        Get current encoder pin states for debugging (updated for shared system)
+        Get current encoder pin states for debugging (gpiozero version)
 
         Returns:
             tuple: (A_state, B_state, last_A_state, encoder_position)
         """
-        current_a = GPIO.input(self.enc_a_pin)
-        current_b = GPIO.input(self.enc_b_pin)
+        # Create temporary input devices to read current states
+        try:
+            temp_a = InputDevice(self.enc_a_pin, pull_up=True)
+            temp_b = InputDevice(self.enc_b_pin, pull_up=True)
+
+            current_a = temp_a.value
+            current_b = temp_b.value
+
+            temp_a.close()
+            temp_b.close()
+        except:
+            # If we can't read the pins, return placeholder values
+            current_a = 0
+            current_b = 0
 
         with N20Motor._lock:
             last_a = N20Motor._encoder_last_states.get(self.motor_id, 0)
@@ -448,16 +488,25 @@ class N20Motor:
         return False
 
     def cleanup(self):
-        """Clean up GPIO and PWM (updated for polling system)"""
+        """Clean up gpiozero devices"""
         try:
             self.stop()
-            time.sleep(0.1)  # Give time for PWM to stop
-            self.pwm.stop()
+            time.sleep(0.1)  # Give time for devices to stop
+        except:
+            pass
+
+        # Close gpiozero devices
+        try:
+            if self.pwm_device:
+                self.pwm_device.close()
+            if self.dir1_device:
+                self.dir1_device.close()
+            if self.dir2_device:
+                self.dir2_device.close()
         except:
             pass
 
         # Encoder cleanup is handled by shared thread
-        # No individual interrupt cleanup needed
 
 
 class DualMotorController:
@@ -465,40 +514,26 @@ class DualMotorController:
     
     def __init__(self, standby_pin):
         """
-        Initialize dual motor controller
-        
+        Initialize dual motor controller using gpiozero
+
         Args:
             standby_pin: GPIO pin for TB6612FNG standby control
         """
         self.standby_pin = standby_pin
 
-        # Setup standby pin with error handling
+        # Setup standby pin with gpiozero
         try:
-            GPIO.setup(self.standby_pin, GPIO.OUT)
+            self.standby_device = OutputDevice(standby_pin)
             self.enable()
-            print(f"✓ Motor controller standby pin {standby_pin} configured")
+            print(f"✓ Motor controller standby pin {standby_pin} configured with gpiozero")
         except Exception as e:
             print(f"❌ CRITICAL: Motor controller standby pin setup failed: {e}")
-
-            # Check if this is the SOC error and provide diagnostics
-            if "soc peripheral base address" in str(e).lower():
-                print("🔍 Same SOC error in DualMotorController - diagnostics:")
-
-                # Create a temporary N20Motor to trigger detailed diagnostics
-                # This will show the Pi model, GPIO version, etc.
-                try:
-                    # Use dummy pins just to trigger the diagnostics
-                    temp_motor = N20Motor(
-                        pwm_pin=18, dir1_pin=23, dir2_pin=24,
-                        enc_a_pin=17, enc_b_pin=27,
-                        name="Diagnostic Motor"
-                    )
-                except Exception:
-                    # The diagnostic output should have appeared above
-                    pass
-
+            print("🔧 This could be due to:")
+            print("   - gpiozero not installed: pip3 install gpiozero")
+            print("   - GPIO pin already in use")
+            print("   - Insufficient permissions")
             print("\n🛑 Cannot operate motors without standby pin control")
-            raise RuntimeError("Motor controller GPIO initialization failed")
+            raise RuntimeError("Motor controller gpiozero initialization failed")
 
         # Motor instances (to be set by user)
         self.motor_a = None
@@ -506,14 +541,14 @@ class DualMotorController:
     
     def enable(self):
         """Enable motor driver (standby HIGH)"""
-        GPIO.output(self.standby_pin, GPIO.HIGH)
-    
+        self.standby_device.on()
+
     def disable(self):
         """Disable motor driver (standby LOW)"""
-        GPIO.output(self.standby_pin, GPIO.LOW)
+        self.standby_device.off()
     
     def cleanup(self):
-        """Clean up all motors and GPIO"""
+        """Clean up all motors and gpiozero devices"""
         try:
             if self.motor_a:
                 self.motor_a.cleanup()
@@ -521,6 +556,10 @@ class DualMotorController:
                 self.motor_b.cleanup()
             time.sleep(0.1)
             self.disable()
+
+            # Close standby device
+            if hasattr(self, 'standby_device'):
+                self.standby_device.close()
         except Exception as e:
             print(f"Warning during cleanup: {e}")
             pass
@@ -562,9 +601,7 @@ class EncoderManager:
 
 # Example usage based on your wiring configuration
 if __name__ == "__main__":
-    # Initialize GPIO
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
+    # gpiozero handles GPIO initialization automatically
     
     try:
         # Create dual motor controller with standby control
@@ -665,5 +702,4 @@ if __name__ == "__main__":
         # Clean up
         print("Cleaning up...")
         controller.cleanup()
-        GPIO.cleanup()
         print("Done")
