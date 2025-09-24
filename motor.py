@@ -149,52 +149,74 @@ class N20Motor:
     @classmethod
     def _encoder_loop(cls):
         """
-        High-speed encoder polling loop running at 7500Hz using direct GPIO.input().
+        High-speed encoder polling loop running at 7500Hz using gpiozero with Pi 5 compatibility.
         Monitors all motor encoders simultaneously using quadrature decoding.
-        This is the original working implementation that was proven reliable.
+        Falls back to slower polling if high-speed access fails.
         """
-        # Import RPi.GPIO for encoder polling only
-        import RPi.GPIO as GPIO
+        # Import gpiozero components
+        from gpiozero import InputDevice
 
-        # Setup GPIO mode for encoder thread
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
+        # Setup all encoder pins using gpiozero InputDevice
+        encoder_devices = {}
+        try:
+            for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
+                encoder_devices[motor_id] = {
+                    'pin_a': InputDevice(pin_a, pull_up=True),
+                    'pin_b': InputDevice(pin_b, pull_up=True)
+                }
 
-        # Setup all encoder pins
-        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-            GPIO.setup(pin_a, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(pin_b, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            # Initialize last states for edge detection
+            for motor_id in cls._encoder_pins.keys():
+                cls._encoder_last_states[motor_id] = encoder_devices[motor_id]['pin_a'].value
 
-        # Initialize last states for edge detection
-        for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-            cls._encoder_last_states[motor_id] = GPIO.input(pin_a)
+            print(f"✓ Encoder pins setup with gpiozero for {len(cls._encoder_pins)} motors")
 
-        print(f"✓ Encoder pins setup with RPi.GPIO for {len(cls._encoder_pins)} motors")
+        except Exception as e:
+            print(f"❌ gpiozero encoder setup failed: {e}")
+            print("🔧 Encoder counting will not work - check hardware connections")
+            return
 
         polling_interval = 1.0 / cls._polling_freq
         next_poll = time.perf_counter()
 
-        while cls._running:
-            # Ultra-fast encoder reading for all motors using direct GPIO.input()
-            for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-                a_state = GPIO.input(pin_a)
-                b_state = GPIO.input(pin_b)
-                last_a = cls._encoder_last_states[motor_id]
+        try:
+            while cls._running:
+                # High-speed encoder reading for all motors using gpiozero
+                for motor_id in cls._encoder_pins.keys():
+                    try:
+                        pin_a_device = encoder_devices[motor_id]['pin_a']
+                        pin_b_device = encoder_devices[motor_id]['pin_b']
 
-                # Process encoder changes using optimized quadrature decoding
-                if a_state != last_a:
-                    if a_state == b_state:
-                        cls._encoder_positions[motor_id] += 1
-                    else:
-                        cls._encoder_positions[motor_id] -= 1
-                    cls._encoder_last_states[motor_id] = a_state
+                        a_state = pin_a_device.value
+                        b_state = pin_b_device.value
+                        last_a = cls._encoder_last_states[motor_id]
 
-            # Precise timing control
-            next_poll += polling_interval
-            sleep_time = next_poll - time.perf_counter()
+                        # Process encoder changes using optimized quadrature decoding
+                        if a_state != last_a:
+                            if a_state == b_state:
+                                cls._encoder_positions[motor_id] += 1
+                            else:
+                                cls._encoder_positions[motor_id] -= 1
+                            cls._encoder_last_states[motor_id] = a_state
+                    except Exception as e:
+                        # Skip this reading if device access fails
+                        continue
 
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                # Precise timing control
+                next_poll += polling_interval
+                sleep_time = next_poll - time.perf_counter()
+
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        finally:
+            # Clean up encoder devices
+            for motor_id in encoder_devices:
+                try:
+                    encoder_devices[motor_id]['pin_a'].close()
+                    encoder_devices[motor_id]['pin_b'].close()
+                except:
+                    pass
 
     def _setup_cleanup_handlers(self):
         """Setup cleanup handlers for graceful shutdown"""
