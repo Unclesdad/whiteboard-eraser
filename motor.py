@@ -32,10 +32,10 @@ class N20Motor:
     _polling_freq = 7500  # 7.5 kHz polling frequency for reliable encoder reading
 
     def __init__(self, pwm_pin, dir1_pin, dir2_pin, enc_a_pin, enc_b_pin,
-                 pwm_frequency=1000, name="Motor"):
+                 pwm_frequency=1000, name="Motor", reverse_encoder=False, use_interrupts=None):
         """
         Initialize N20 motor with encoder
-        
+
         Args:
             pwm_pin: GPIO pin for PWM speed control
             dir1_pin: GPIO pin for direction control 1
@@ -44,6 +44,8 @@ class N20Motor:
             enc_b_pin: GPIO pin for encoder channel B
             pwm_frequency: PWM frequency in Hz (default 1000)
             name: Motor name for identification
+            reverse_encoder: If True, reverse encoder direction (backward compatibility)
+            use_interrupts: Ignored - always uses high-speed polling (backward compatibility)
         """
         self.pwm_pin = pwm_pin
         self.dir1_pin = dir1_pin
@@ -51,6 +53,7 @@ class N20Motor:
         self.enc_a_pin = enc_a_pin
         self.enc_b_pin = enc_b_pin
         self.name = name
+        self.reverse_encoder = reverse_encoder
 
         # Register this motor with shared encoder system
         with N20Motor._lock:
@@ -61,6 +64,12 @@ class N20Motor:
 
         # Motor state
         self.current_speed = 0.0  # -1.0 to 1.0
+
+        # Backward compatibility info
+        if use_interrupts is not None:
+            print(f"  Note: use_interrupts parameter ignored - using high-speed polling at {N20Motor._polling_freq}Hz")
+        if reverse_encoder:
+            print(f"  {self.name}: Encoder direction reversed")
         
         # Setup GPIO with diagnostics
         self._setup_gpio(pwm_frequency)
@@ -217,7 +226,8 @@ class N20Motor:
             int: Current encoder count (positive = forward, negative = reverse)
         """
         with N20Motor._lock:
-            return N20Motor._encoder_positions.get(self.motor_id, 0)
+            count = N20Motor._encoder_positions.get(self.motor_id, 0)
+            return -count if self.reverse_encoder else count
 
     def reset_encoder(self):
         """Reset encoder position to zero."""
@@ -299,7 +309,11 @@ class N20Motor:
             'encoder_b_current': b_state,
             'encoder_a_last': last_a,
             'position_from_shared': position,
-            'polling_frequency': N20Motor._polling_freq
+            'polling_frequency': N20Motor._polling_freq,
+            # Backward compatibility fields for forward_then_backward.py
+            'encoder_method': 'high-speed-polling',
+            'active': N20Motor._running,
+            'reverse_encoder': self.reverse_encoder
         }
     
     def stop(self):
@@ -486,6 +500,40 @@ class DualMotorController:
         except Exception as e:
             print(f"Warning during cleanup: {e}")
             pass
+
+
+class EncoderManager:
+    """
+    Backward compatibility class for old motor code that expects EncoderManager.
+    The new implementation integrates encoder management into N20Motor class-level methods.
+    """
+
+    @staticmethod
+    def get_polling_frequency():
+        """Get the current encoder polling frequency"""
+        return N20Motor._polling_freq
+
+    @staticmethod
+    def is_running():
+        """Check if encoder polling thread is running"""
+        return N20Motor._running
+
+    @staticmethod
+    def get_motor_count():
+        """Get number of registered motors"""
+        with N20Motor._lock:
+            return N20Motor._motor_count
+
+    @staticmethod
+    def get_all_positions():
+        """Get positions of all registered motors"""
+        with N20Motor._lock:
+            return N20Motor._encoder_positions.copy()
+
+    def __init__(self):
+        """Initialize encoder manager (for backward compatibility)"""
+        print("⚠️  EncoderManager is deprecated - encoder management is now built into N20Motor")
+        print(f"✓ High-speed encoder polling active at {N20Motor._polling_freq}Hz")
 
 
 # Example usage based on your wiring configuration
