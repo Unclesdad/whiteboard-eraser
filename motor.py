@@ -34,6 +34,7 @@ class N20Motor:
     _encoder_thread = None
     _encoder_positions = {}
     _encoder_pins = {}
+    _encoder_devices = {}  # Store gpiozero InputDevice objects
     _encoder_last_states = {}
     _running = False
     _lock = threading.Lock()
@@ -70,6 +71,13 @@ class N20Motor:
             N20Motor._motor_count += 1
             N20Motor._encoder_pins[self.motor_id] = (enc_a_pin, enc_b_pin)
             N20Motor._encoder_positions[self.motor_id] = 0
+
+            # Create encoder input devices immediately
+            from gpiozero import InputDevice
+            N20Motor._encoder_devices[self.motor_id] = {
+                'pin_a': InputDevice(enc_a_pin, pull_up=True),
+                'pin_b': InputDevice(enc_b_pin, pull_up=True)
+            }
 
         # Motor state
         self.current_speed = 0.0  # -1.0 to 1.0
@@ -149,74 +157,40 @@ class N20Motor:
     @classmethod
     def _encoder_loop(cls):
         """
-        High-speed encoder polling loop running at 7500Hz using gpiozero with Pi 5 compatibility.
+        High-speed encoder polling loop running at 7500Hz using gpiozero.
         Monitors all motor encoders simultaneously using quadrature decoding.
-        Falls back to slower polling if high-speed access fails.
+        Uses pre-created InputDevice objects for maximum speed.
         """
-        # Import gpiozero components
-        from gpiozero import InputDevice
+        # Initialize last states for edge detection using pre-created devices
+        for motor_id in cls._encoder_devices.keys():
+            cls._encoder_last_states[motor_id] = cls._encoder_devices[motor_id]['pin_a'].value
 
-        # Setup all encoder pins using gpiozero InputDevice
-        encoder_devices = {}
-        try:
-            for motor_id, (pin_a, pin_b) in cls._encoder_pins.items():
-                encoder_devices[motor_id] = {
-                    'pin_a': InputDevice(pin_a, pull_up=True),
-                    'pin_b': InputDevice(pin_b, pull_up=True)
-                }
-
-            # Initialize last states for edge detection
-            for motor_id in cls._encoder_pins.keys():
-                cls._encoder_last_states[motor_id] = encoder_devices[motor_id]['pin_a'].value
-
-            print(f"✓ Encoder pins setup with gpiozero for {len(cls._encoder_pins)} motors")
-
-        except Exception as e:
-            print(f"❌ gpiozero encoder setup failed: {e}")
-            print("🔧 Encoder counting will not work - check hardware connections")
-            return
+        print(f"✓ Encoder pins setup with gpiozero for {len(cls._encoder_devices)} motors")
 
         polling_interval = 1.0 / cls._polling_freq
         next_poll = time.perf_counter()
 
-        try:
-            while cls._running:
-                # High-speed encoder reading for all motors using gpiozero
-                for motor_id in cls._encoder_pins.keys():
-                    try:
-                        pin_a_device = encoder_devices[motor_id]['pin_a']
-                        pin_b_device = encoder_devices[motor_id]['pin_b']
+        while cls._running:
+            # Ultra-fast encoder reading for all motors using pre-created gpiozero devices
+            for motor_id, encoder_devices in cls._encoder_devices.items():
+                a_state = encoder_devices['pin_a'].value
+                b_state = encoder_devices['pin_b'].value
+                last_a = cls._encoder_last_states[motor_id]
 
-                        a_state = pin_a_device.value
-                        b_state = pin_b_device.value
-                        last_a = cls._encoder_last_states[motor_id]
+                # Process encoder changes using optimized quadrature decoding (exact same logic as working version)
+                if a_state != last_a:
+                    if a_state == b_state:
+                        cls._encoder_positions[motor_id] += 1
+                    else:
+                        cls._encoder_positions[motor_id] -= 1
+                    cls._encoder_last_states[motor_id] = a_state
 
-                        # Process encoder changes using optimized quadrature decoding
-                        if a_state != last_a:
-                            if a_state == b_state:
-                                cls._encoder_positions[motor_id] += 1
-                            else:
-                                cls._encoder_positions[motor_id] -= 1
-                            cls._encoder_last_states[motor_id] = a_state
-                    except Exception as e:
-                        # Skip this reading if device access fails
-                        continue
+            # Precise timing control (exact same as working version)
+            next_poll += polling_interval
+            sleep_time = next_poll - time.perf_counter()
 
-                # Precise timing control
-                next_poll += polling_interval
-                sleep_time = next_poll - time.perf_counter()
-
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-
-        finally:
-            # Clean up encoder devices
-            for motor_id in encoder_devices:
-                try:
-                    encoder_devices[motor_id]['pin_a'].close()
-                    encoder_devices[motor_id]['pin_b'].close()
-                except:
-                    pass
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     def _setup_cleanup_handlers(self):
         """Setup cleanup handlers for graceful shutdown"""
@@ -517,6 +491,16 @@ class N20Motor:
                 self.dir1_device.close()
             if self.dir2_device:
                 self.dir2_device.close()
+        except:
+            pass
+
+        # Close encoder devices
+        try:
+            if self.motor_id in N20Motor._encoder_devices:
+                encoder_devs = N20Motor._encoder_devices[self.motor_id]
+                encoder_devs['pin_a'].close()
+                encoder_devs['pin_b'].close()
+                del N20Motor._encoder_devices[self.motor_id]
         except:
             pass
 
