@@ -19,13 +19,13 @@ from picamera2.outputs import FileOutput
 # Import our simple marking detector
 from simple_marking_detector import SimpleMarkingDetector
 
-# Configuration - change resolution here
-CAMERA_WIDTH = 1920
-CAMERA_HEIGHT = 1080
+# Configuration - LOW POWER MODE for battery operation
+CAMERA_WIDTH = 960   # Reduced from 1920 to save power
+CAMERA_HEIGHT = 540  # Reduced from 1080 to save power
 
 # Processing resolution (downscale for speed while keeping full FOV)
-PROCESSING_WIDTH = 1280
-PROCESSING_HEIGHT = 720
+PROCESSING_WIDTH = 640   # Reduced from 1280 to save processing power
+PROCESSING_HEIGHT = 360  # Reduced from 720 to save processing power
 
 PAGE = """\
 <html>
@@ -204,8 +204,8 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                     self.surface_frame = surface_jpeg_data.tobytes()
                     self.surface_condition.notify_all()
 
-                # Small delay
-                time.sleep(0.05)
+                # Increased delay for battery power savings (was 0.05)
+                time.sleep(0.1)  # Reduces to ~10 FPS max
 
             except Exception as e:
                 print(f"Simple detection error: {e}")
@@ -398,8 +398,8 @@ def main():
         controls = {
             "AeEnable": False,          # Disable auto-exposure
             "AwbEnable": True,          # Enable auto white balance for color consistency
-            "ExposureTime": 8000,       # Tuned exposure time (microseconds)
-            "AnalogueGain": 2.5,        # Tuned gain for brighter image
+            "ExposureTime": 4000,       # Reduced exposure time to save power (was 8000)
+            "AnalogueGain": 1.5,        # Reduced gain to save power (was 2.5)
             "Brightness": 0.6,          # High brightness (0.0 to 1.0)
             "Contrast": 2,              # Higher contrast for better marking distinction
         }
