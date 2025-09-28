@@ -398,8 +398,8 @@ def main():
         controls = {
             "AeEnable": False,          # Disable auto-exposure
             "AwbEnable": True,          # Enable auto white balance for color consistency
-            "ExposureTime": 4000,       # Reduced exposure time to save power (was 8000)
-            "AnalogueGain": 1.5,        # Reduced gain to save power (was 2.5)
+            "ExposureTime": 8000,       # Reduced exposure time to save power (was 8000)
+            "AnalogueGain": 2.5,        # Reduced gain to save power (was 2.5)
             "Brightness": 0.6,          # High brightness (0.0 to 1.0)
             "Contrast": 2,              # Higher contrast for better marking distinction
         }

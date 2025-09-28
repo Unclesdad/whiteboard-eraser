@@ -48,6 +48,9 @@ class SimpleMarkingDetector:
         self.marking_threshold = 120  # Much higher threshold - pen marks are darker than this
         self.gaussian_blur_size = 3
 
+        # Edge exclusion parameters
+        self.edge_exclusion_pixels = 15  # Exclude markings within 15 pixels of whiteboard edge
+
         # Whiteboard detection - much simpler
         self.whiteboard_threshold = 140  # Lower threshold for whiteboard detection
         self.whiteboard_area_threshold = 1000  # Minimum area for valid whiteboard surface
@@ -153,6 +156,32 @@ class SimpleMarkingDetector:
 
         return surface_mask
 
+    def _create_edge_exclusion_mask(self, white_surface_mask: np.ndarray) -> np.ndarray:
+        """
+        Create a mask that excludes only areas near the whiteboard boundary,
+        preserving the full interior for marking detection.
+        """
+        # Start with the full white surface
+        detection_mask = white_surface_mask.copy()
+
+        # Find the contour of the whiteboard boundary
+        contours, _ = cv2.findContours(white_surface_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours:
+            # Get the largest contour (main whiteboard boundary)
+            largest_contour = max(contours, key=cv2.contourArea)
+
+            # Create a mask for the boundary exclusion zone
+            boundary_mask = np.zeros_like(white_surface_mask)
+
+            # Draw the contour with thick line to create exclusion zone
+            cv2.drawContours(boundary_mask, [largest_contour], -1, 255, thickness=self.edge_exclusion_pixels * 2)
+
+            # Remove the boundary zone from the detection mask
+            detection_mask = cv2.bitwise_and(detection_mask, cv2.bitwise_not(boundary_mask))
+
+        return detection_mask
+
     def detect_markings(self, image: np.ndarray) -> List[Marking]:
         """
         Detect markings using white surface detection approach
@@ -175,22 +204,25 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
+        # Create edge exclusion mask - only exclude areas near whiteboard boundary
+        detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
+
         # MULTI-SCALE APPROACH: Use different kernel sizes for different image regions
         # Bottom = close markings (large kernel), Middle = medium kernel, Top = distant markings (small kernel)
-        height = white_surface_mask.shape[0]
+        height = detection_mask.shape[0]
 
         # Define regions
         top_boundary = int(height * 0.33)      # Top 33% of image
         bottom_boundary = int(height * 0.67)   # Bottom 33% of image
 
-        # Create masks for each region
-        top_mask = np.zeros_like(white_surface_mask)
-        middle_mask = np.zeros_like(white_surface_mask)
-        bottom_mask = np.zeros_like(white_surface_mask)
+        # Create masks for each region using the edge-excluded detection mask
+        top_mask = np.zeros_like(detection_mask)
+        middle_mask = np.zeros_like(detection_mask)
+        bottom_mask = np.zeros_like(detection_mask)
 
-        top_mask[:top_boundary, :] = white_surface_mask[:top_boundary, :]
-        middle_mask[top_boundary:bottom_boundary, :] = white_surface_mask[top_boundary:bottom_boundary, :]
-        bottom_mask[bottom_boundary:, :] = white_surface_mask[bottom_boundary:, :]
+        top_mask[:top_boundary, :] = detection_mask[:top_boundary, :]
+        middle_mask[top_boundary:bottom_boundary, :] = detection_mask[top_boundary:bottom_boundary, :]
+        bottom_mask[bottom_boundary:, :] = detection_mask[bottom_boundary:, :]
 
         # Define kernels for each region
         small_kernel = np.ones((5, 5), np.uint8)    # Small kernel for distant markings (top)
@@ -198,7 +230,7 @@ class SimpleMarkingDetector:
         large_kernel = np.ones((13, 13), np.uint8)  # Large kernel for close markings (bottom)
 
         # Process each region separately
-        holes_combined = np.zeros_like(white_surface_mask)
+        holes_combined = np.zeros_like(detection_mask)
 
         # Top region (distant markings - small kernel)
         if np.any(top_mask):
@@ -254,11 +286,12 @@ class SimpleMarkingDetector:
                 center_y = y + h / 2
 
                 # Simple confidence based on area and position within white surface
-                # Check if marking is well within the white surface
-                if white_surface_mask[int(center_y), int(center_x)] > 0:
-                    position_score = 1.0  # Inside white surface
+                # Check if marking is well within the inner (edge-excluded) detection area
+                if detection_mask[int(center_y), int(center_x)] > 0:
+                    position_score = 1.0  # Inside detection area (away from edges)
                 else:
-                    position_score = 0.3  # Outside or on edge
+                    position_score = 0.0  # Too close to edge or outside - skip this marking
+                    continue  # Skip markings too close to whiteboard edges
 
                 area_score = min(1.0, area / 100.0)  # Bigger = more confident
                 confidence = (position_score * 0.7 + area_score * 0.3)
