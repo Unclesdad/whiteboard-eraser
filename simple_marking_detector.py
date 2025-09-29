@@ -212,8 +212,9 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # Create edge exclusion mask - only exclude areas near whiteboard boundary
-        detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
+        # Temporarily disable edge exclusion for debugging
+        detection_mask = white_surface_mask  # Use full surface for now
+        # detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
 
         # MULTI-SCALE APPROACH: Use different kernel sizes for different image regions
         # Bottom = close markings (large kernel), Middle = medium kernel, Top = distant markings (small kernel)
@@ -260,6 +261,13 @@ class SimpleMarkingDetector:
         # Find contours of the holes (these are our markings!)
         contours, _ = cv2.findContours(holes_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        if self.debug:
+            dark_pixels = np.sum(dark_areas)
+            markings_pixels = np.sum(markings_mask) / 255.0
+            print(f"  Dark pixels in image: {dark_pixels}")
+            print(f"  Dark pixels in surface: {markings_pixels}")
+            print(f"  Found {len(contours)} contours before filtering")
+
         markings = []
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -283,6 +291,9 @@ class SimpleMarkingDetector:
                 max_area = 2000
 
             # Region-appropriate area filtering
+            if self.debug:
+                print(f"    Contour {len(markings)}: area={area:.1f}, range={min_area}-{max_area}")
+
             if min_area <= area <= max_area:
                 # Calculate center
                 center_x = x + w / 2
