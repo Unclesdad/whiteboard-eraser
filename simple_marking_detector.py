@@ -243,8 +243,16 @@ class SimpleMarkingDetector:
 
         holes_mask = np.zeros_like(detection_mask)
 
-        # Find holes: areas within detection mask that are black in the white surface
-        holes_mask[(detection_mask > 0) & (white_surface_mask == 0)] = 255
+        # Find black spots directly in the original image within the detection area
+        gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+
+        # Find dark pixels (black spots) in the detection area
+        dark_threshold = 100  # Pixels darker than this = black spots
+        dark_spots = gray < dark_threshold
+
+        # Only keep dark spots that are within the detection area (inside yellow lines)
+        holes_mask = np.zeros_like(detection_mask)
+        holes_mask[(detection_mask > 0) & dark_spots] = 255
 
         if self.debug:
             white_area = np.sum(white_surface_mask) / 255.0

@@ -400,7 +400,7 @@ def main():
             "AwbEnable": True,          # Enable auto white balance for color consistency
             "ExposureTime": 8000,       # Reduced exposure time to save power 
             "AnalogueGain": 2.5,        # Reduced gain to save power
-            "Brightness": 0.7125,          # High brightness (0.0 to 1.0)
+            "Brightness": 0.72,          # High brightness (0.0 to 1.0)
             "Contrast": 2,              # Higher contrast for better marking distinction
         }
         picam2.set_controls(controls)
