@@ -212,8 +212,8 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # No edge exclusion - use full surface area
-        detection_mask = white_surface_mask
+        # Create edge exclusion mask to avoid detecting boundary artifacts as markings
+        detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
 
         # SIMPLE HOLE DETECTION APPROACH:
         # Find black holes directly within the white surface mask
@@ -226,10 +226,9 @@ class SimpleMarkingDetector:
         holes_mask = cv2.bitwise_not(white_surface_mask)
 
         # Only keep holes that are completely surrounded by white surface
-        # Use morphological operations to clean up edge artifacts
-        kernel = np.ones((3, 3), np.uint8)
+        # Use very light morphological operations to preserve small markings
+        kernel = np.ones((2, 2), np.uint8)  # Smaller kernel to preserve small holes
         holes_mask = cv2.morphologyEx(holes_mask, cv2.MORPH_OPEN, kernel)  # Remove small noise
-        holes_mask = cv2.morphologyEx(holes_mask, cv2.MORPH_CLOSE, kernel)  # Fill small gaps
 
         # Further filter: only keep holes that are INSIDE the detection mask (away from edges)
         # This ensures we don't detect edge artifacts as markings
@@ -275,7 +274,7 @@ class SimpleMarkingDetector:
             area = cv2.contourArea(contour)
 
             # Simple area filtering - detect holes of reasonable size
-            min_area = 5    # Minimum area to avoid noise
+            min_area = 1    # Very low minimum to catch small markings
             max_area = 5000 # Maximum area to avoid detecting large edge artifacts
 
             if self.debug:
