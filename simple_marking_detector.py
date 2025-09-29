@@ -212,8 +212,8 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # Use fixed edge exclusion with much thinner boundary
-        detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
+        # No edge exclusion - use full surface area
+        detection_mask = white_surface_mask
 
         # MULTI-SCALE APPROACH: Use different kernel sizes for different image regions
         # Bottom = close markings (large kernel), Middle = medium kernel, Top = distant markings (small kernel)
