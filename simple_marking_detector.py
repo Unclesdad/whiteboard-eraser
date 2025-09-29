@@ -212,9 +212,8 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # Temporarily disable edge exclusion for debugging
-        detection_mask = white_surface_mask  # Use full surface for now
-        # detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
+        # Re-enable edge exclusion for proper detection
+        detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
 
         # MULTI-SCALE APPROACH: Use different kernel sizes for different image regions
         # Bottom = close markings (large kernel), Middle = medium kernel, Top = distant markings (small kernel)
@@ -261,7 +260,23 @@ class SimpleMarkingDetector:
         contours, _ = cv2.findContours(holes_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if self.debug:
+            holes_after_cleanup = np.sum(holes_cleaned) / 255.0
+            print(f"  Holes after cleanup: {holes_after_cleanup:.0f}px")
             print(f"  Found {len(contours)} contours before filtering")
+            if len(contours) == 0:
+                # Check if the issue is in hole detection
+                raw_holes = np.sum(holes_mask) / 255.0
+                print(f"  Raw holes before cleanup: {raw_holes:.0f}px")
+                white_pixels = np.sum(white_surface_mask) / 255.0
+                print(f"  White surface pixels: {white_pixels:.0f}px")
+
+                # Check specific conditions
+                detection_pixels = np.sum(detection_mask > 0)
+                surface_zero_pixels = np.sum(white_surface_mask == 0)
+                overlap_pixels = np.sum((detection_mask > 0) & (white_surface_mask == 0))
+                print(f"  Detection mask pixels: {detection_pixels}")
+                print(f"  Surface zero pixels: {surface_zero_pixels}")
+                print(f"  Overlap (should be holes): {overlap_pixels}")
 
         markings = []
         for contour in contours:
