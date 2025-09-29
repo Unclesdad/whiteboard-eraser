@@ -243,16 +243,19 @@ class SimpleMarkingDetector:
 
         holes_mask = np.zeros_like(detection_mask)
 
-        # Find black spots directly in the original image within the detection area
+        # Find holes (black spots) directly in the white surface mask
+        # The white mask already has holes where markings are - just find them!
+        holes_mask = np.zeros_like(detection_mask)
+
+        # Find black spots only INSIDE the yellow lines (white surface boundary)
+        # Get original image brightness
         gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
 
-        # Find dark pixels (black spots) in the detection area
-        dark_threshold = 100  # Pixels darker than this = black spots
-        dark_spots = gray < dark_threshold
+        # Find dark spots in original image
+        dark_spots = gray < 120  # Black spots
 
-        # Only keep dark spots that are within the detection area (inside yellow lines)
-        holes_mask = np.zeros_like(detection_mask)
-        holes_mask[(detection_mask > 0) & dark_spots] = 255
+        # Only keep black spots that are INSIDE the yellow lines (white surface area)
+        holes_mask[(white_surface_mask > 0) & dark_spots] = 255
 
         if self.debug:
             white_area = np.sum(white_surface_mask) / 255.0
@@ -264,9 +267,8 @@ class SimpleMarkingDetector:
             print(f"  Excluded by edge: {excluded_area:.0f}px ({excluded_area/white_area*100:.1f}%)")
             print(f"  Hole pixels found: {holes_found:.0f}px")
 
-        # Clean up small noise
-        cleanup_kernel = np.ones((3, 3), np.uint8)
-        holes_cleaned = cv2.morphologyEx(holes_mask, cv2.MORPH_OPEN, cleanup_kernel)
+        # Skip cleanup to avoid removing markings
+        holes_cleaned = holes_mask
 
         # Find contours of the holes (these are our markings!)
         contours, _ = cv2.findContours(holes_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
