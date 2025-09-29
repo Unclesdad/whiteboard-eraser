@@ -238,34 +238,29 @@ class SimpleMarkingDetector:
         medium_kernel = np.ones((7, 7), np.uint8)   # Medium kernel for middle
         large_kernel = np.ones((13, 13), np.uint8)  # Large kernel for close markings (bottom)
 
-        # Find dark spots (markings) within the white surface
-        # Markings are already dark holes in the white surface mask
-        # So we need to find the inverse: where white surface should be white but isn't
+        # Find holes (black pixels) directly in the white surface mask
+        # The white surface mask already has holes where markings are
+        # Markings = areas that should be white (detection area) but are black (value = 0)
 
-        # Get the original image brightness in the detection area
-        gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+        holes_mask = np.zeros_like(detection_mask)
 
-        # Find dark areas within the detected white surface
-        # Areas that are part of the surface but below marking threshold = markings
-        dark_threshold = 120  # Darker than this = potential marking
-        dark_areas = gray < dark_threshold
+        # Find holes: areas within detection mask that are black in the white surface
+        holes_mask[(detection_mask > 0) & (white_surface_mask == 0)] = 255
 
-        # Only keep dark areas that are within the detection mask (white surface)
-        markings_mask = np.zeros_like(detection_mask)
-        markings_mask[detection_mask > 0] = dark_areas[detection_mask > 0] * 255
+        if self.debug:
+            detection_area = np.sum(detection_mask) / 255.0
+            holes_found = np.sum(holes_mask) / 255.0
+            print(f"  Detection area: {detection_area:.0f}px")
+            print(f"  Hole pixels found: {holes_found:.0f}px")
 
-        # Clean up the markings detection
+        # Clean up small noise
         cleanup_kernel = np.ones((3, 3), np.uint8)
-        holes_cleaned = cv2.morphologyEx(markings_mask, cv2.MORPH_OPEN, cleanup_kernel)
+        holes_cleaned = cv2.morphologyEx(holes_mask, cv2.MORPH_OPEN, cleanup_kernel)
 
         # Find contours of the holes (these are our markings!)
         contours, _ = cv2.findContours(holes_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if self.debug:
-            dark_pixels = np.sum(dark_areas)
-            markings_pixels = np.sum(markings_mask) / 255.0
-            print(f"  Dark pixels in image: {dark_pixels}")
-            print(f"  Dark pixels in surface: {markings_pixels}")
             print(f"  Found {len(contours)} contours before filtering")
 
         markings = []
@@ -276,19 +271,19 @@ class SimpleMarkingDetector:
             x, y, w, h = cv2.boundingRect(contour)
             center_y = y + h / 2
 
-            # Distance-aware area thresholds based on image region
+            # Much more permissive area thresholds to catch visible markings
             if center_y < top_boundary:
-                # Top region - distant markings, smaller area thresholds
-                min_area = 2
-                max_area = 300
+                # Top region - distant markings, very small area thresholds
+                min_area = 1
+                max_area = 500
             elif center_y < bottom_boundary:
                 # Middle region - medium area thresholds
-                min_area = 4
-                max_area = 800
+                min_area = 1
+                max_area = 1000
             else:
                 # Bottom region - close markings, larger area thresholds
-                min_area = 6
-                max_area = 2000
+                min_area = 1
+                max_area = 3000
 
             # Region-appropriate area filtering
             if self.debug:
