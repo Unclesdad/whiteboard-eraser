@@ -122,32 +122,40 @@ class SimpleMarkingDetector:
         kernel = np.ones((3, 3), np.uint8)
         white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
 
-        # Find connected components
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(white_mask, connectivity=8)
-
-        # Find the component that touches the bottom edge
+        # Use flood fill from bottom edge to find connected whiteboard area
+        # This preserves holes (markings) unlike connected components
         bottom_row = height - 1
         surface_mask = np.zeros_like(white_mask, dtype=np.uint8)
 
-        best_component = None
-        best_area = 0
+        # Create a slightly larger image for flood fill (opencv requirement)
+        h, w = white_mask.shape
+        flood_mask = np.zeros((h + 2, w + 2), np.uint8)
 
-        for label in range(1, num_labels):  # Skip background (label 0)
-            # Check if this component touches the bottom edge
-            component_mask = (labels == label).astype(np.uint8) * 255
+        # Find all white pixels on the bottom edge
+        bottom_white_pixels = []
+        for x in range(width):
+            if white_mask[bottom_row, x] > 0:
+                bottom_white_pixels.append((x, bottom_row))
 
-            # Check if any pixels in bottom row belong to this component
-            if np.any(component_mask[bottom_row, :] > 0):
-                area = stats[label, cv2.CC_STAT_AREA]
+        if bottom_white_pixels:
+            # Start flood fill from the first bottom white pixel
+            start_x, start_y = bottom_white_pixels[0]
 
-                # Find the largest component that touches bottom
-                if area > best_area and area > self.whiteboard_area_threshold:
-                    best_area = area
-                    best_component = label
+            # Flood fill to find all connected white areas
+            # This preserves holes because we're working with the original thresholded mask
+            cv2.floodFill(white_mask, flood_mask, (start_x, start_y), 128)  # Use gray value to mark flooded area
 
-        # Use the best component as our surface
-        if best_component is not None:
-            surface_mask = (labels == best_component).astype(np.uint8) * 255
+            # Create surface mask from flooded area, but preserve original brightness threshold
+            # Areas marked as 128 are the connected whiteboard region
+            flooded_area = (white_mask == 128)
+
+            # Apply the flooded area to the ORIGINAL brightness threshold to preserve holes
+            original_threshold = cv2.threshold(gray, brightness_threshold, 255, cv2.THRESH_BINARY)[1]
+            surface_mask = np.where(flooded_area, original_threshold, 0).astype(np.uint8)
+
+            # Restore the white_mask for consistency
+            white_mask[white_mask == 128] = 255
+
         else:
             # Fallback: use bottom portion of image
             print(f"  No bottom-connected blob found, using fallback")
