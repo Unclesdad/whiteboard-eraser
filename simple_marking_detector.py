@@ -182,8 +182,8 @@ class SimpleMarkingDetector:
             # Create a mask for the boundary exclusion zone
             boundary_mask = np.zeros_like(white_surface_mask)
 
-            # Draw the contour with thick line to create exclusion zone
-            cv2.drawContours(boundary_mask, [largest_contour], -1, 255, thickness=self.edge_exclusion_pixels * 2)
+            # Draw the contour with much thinner line for exclusion zone
+            cv2.drawContours(boundary_mask, [largest_contour], -1, 255, thickness=5)  # Fixed 5-pixel thickness
 
             # Remove the boundary zone from the detection mask
             detection_mask = cv2.bitwise_and(detection_mask, cv2.bitwise_not(boundary_mask))
@@ -212,7 +212,7 @@ class SimpleMarkingDetector:
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # Re-enable edge exclusion for proper detection
+        # Use fixed edge exclusion with much thinner boundary
         detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
 
         # MULTI-SCALE APPROACH: Use different kernel sizes for different image regions
@@ -247,9 +247,13 @@ class SimpleMarkingDetector:
         holes_mask[(detection_mask > 0) & (white_surface_mask == 0)] = 255
 
         if self.debug:
+            white_area = np.sum(white_surface_mask) / 255.0
             detection_area = np.sum(detection_mask) / 255.0
+            excluded_area = white_area - detection_area
             holes_found = np.sum(holes_mask) / 255.0
+            print(f"  White surface: {white_area:.0f}px")
             print(f"  Detection area: {detection_area:.0f}px")
+            print(f"  Excluded by edge: {excluded_area:.0f}px ({excluded_area/white_area*100:.1f}%)")
             print(f"  Hole pixels found: {holes_found:.0f}px")
 
         # Clean up small noise
@@ -286,7 +290,7 @@ class SimpleMarkingDetector:
             x, y, w, h = cv2.boundingRect(contour)
             center_y = y + h / 2
 
-            # Much more permissive area thresholds to catch visible markings
+            # Very low minimum area to catch all markings
             if center_y < top_boundary:
                 # Top region - distant markings, very small area thresholds
                 min_area = 1
