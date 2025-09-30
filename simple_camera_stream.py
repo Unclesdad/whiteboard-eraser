@@ -101,7 +101,7 @@ h1 { margin: 10px 0; font-size: 24px; }
 <div class="video-panel">
 <img src="map.mjpg" class="video">
 <div class="video-label">4. Spatial Map (Top-Down)</div>
-<div class="video-description">800x600mm view • Green=Established, Yellow=Medium, Orange=New</div>
+<div class="video-description">400x300mm view • Green=Established, Yellow=Medium, Orange=New</div>
 </div>
 </div>
 
@@ -150,7 +150,10 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         self.map_condition = Condition()
 
         # Simple detection system - configure for processing resolution
+        # Camera is at 75mm (7.5cm) height, 20.5° down angle
         self.detector = SimpleMarkingDetector(
+            camera_height_mm=75.0,  # Correct: 7.5cm
+            camera_angle_deg=20.5,  # Correct angle
             image_width=PROCESSING_WIDTH,
             image_height=PROCESSING_HEIGHT,
             debug=True
@@ -391,9 +394,10 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         map_width = 640
         map_height = 480
 
-        # View area in mm (800mm x 600mm centered on car)
-        view_width_mm = 800.0
-        view_height_mm = 600.0
+        # View area in mm - larger range for low camera height
+        # Camera at 7.5cm sees markings relatively close
+        view_width_mm = 400.0  # ±200mm left/right
+        view_height_mm = 300.0  # 300mm forward (camera points forward)
 
         # Scale: pixels per mm
         scale_x = map_width / view_width_mm
@@ -465,12 +469,21 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         cv2.polylines(map_img, [car_points], True, (200, 0, 0), 2)
 
         # Add legend and info
-        cv2.putText(map_img, "Map View (800x600mm)", (10, 20),
+        cv2.putText(map_img, f"Map View ({int(view_width_mm)}x{int(view_height_mm)}mm)", (10, 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
         with self.tracking_lock:
             active_count = len([t for t in self.tracked_markings if t.frames_absent == 0])
             total_count = len(self.tracked_markings)
+
+            # Debug: show position range of markings
+            if total_count > 0:
+                x_positions = [t.x for t in self.tracked_markings]
+                y_positions = [t.y for t in self.tracked_markings]
+                x_range = f"X:[{min(x_positions):.0f},{max(x_positions):.0f}]"
+                y_range = f"Y:[{min(y_positions):.0f},{max(y_positions):.0f}]"
+                cv2.putText(map_img, f"{x_range} {y_range}",
+                           (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
 
         cv2.putText(map_img, f"Markings: {active_count} active / {total_count} total",
                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
@@ -478,11 +491,11 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
 
         # Add scale reference
-        scale_length_mm = 100.0
+        scale_length_mm = 50.0  # Smaller scale for smaller view
         scale_length_px = int(scale_length_mm * scale_x)
         scale_y_pos = map_height - 20
         cv2.line(map_img, (10, scale_y_pos), (10 + scale_length_px, scale_y_pos), (0, 0, 0), 2)
-        cv2.putText(map_img, "100mm", (15, scale_y_pos - 5),
+        cv2.putText(map_img, "50mm", (15, scale_y_pos - 5),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
 
         return map_img
