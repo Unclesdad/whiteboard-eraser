@@ -73,27 +73,23 @@ class SimpleMarkingDetector:
         print(f"  Very permissive thresholds for maximum detection")
 
     def _calculate_pixel_to_mm_factors(self):
-        """Calculate conversion factors from pixels to millimeters"""
-        # Simplified version from original
-        fov_half_vertical = self.fov_vertical_rad / 2
+        """Calculate conversion factors from pixels to millimeters
 
-        angle_far = self.camera_angle_rad - fov_half_vertical
-        if abs(angle_far) < 0.01:
-            angle_far = 0.01
-        far_distance = self.camera_height_mm / np.tan(angle_far)
+        Simplified model: Calculate at center viewing angle
+        """
+        # Distance forward at center of image
+        center_distance = self.camera_height_mm / np.tan(self.camera_angle_rad)
 
-        angle_near = self.camera_angle_rad + fov_half_vertical
-        if abs(angle_near) < 0.01:
-            angle_near = 0.01
-        near_distance = self.camera_height_mm / np.tan(angle_near)
+        # Horizontal coverage at this distance
+        horizontal_coverage_mm = 2 * center_distance * np.tan(self.fov_horizontal_rad / 2)
 
-        total_vertical_mm = far_distance - near_distance
-        horizontal_coverage_mm = 2 * self.camera_height_mm * np.tan(self.fov_horizontal_rad / 2)
-
+        # Store for X coordinate conversion
         self.mm_per_pixel_x = horizontal_coverage_mm / self.image_width
-        self.mm_per_pixel_y = total_vertical_mm / self.image_height
-        self.near_distance_mm = near_distance
-        self.far_distance_mm = far_distance
+
+        # For debugging
+        if self.debug:
+            print(f"  Camera geometry: center distance={center_distance:.0f}mm, H width={horizontal_coverage_mm:.0f}mm")
+            print(f"  Conversion: {self.mm_per_pixel_x:.2f} mm/px horizontal")
 
     def rotate_image_180(self, image: np.ndarray) -> np.ndarray:
         """Rotate image 180 degrees to correct upside-down camera mounting"""
@@ -329,18 +325,37 @@ class SimpleMarkingDetector:
         return markings
 
     def pixel_to_camera_relative_mm(self, pixel_x: float, pixel_y: float) -> Tuple[float, float]:
-        """Convert pixel coordinates to millimeters relative to camera position"""
+        """Convert pixel coordinates to millimeters relative to camera position
+
+        Simplified model for low-mounted camera:
+        - Camera at 75mm height looks down at surface
+        - Use direct angular projection for small distances
+        """
         center_x_px = self.image_width / 2
         center_y_px = self.image_height / 2
 
+        # X coordinate: straightforward horizontal mapping
         dx_px = pixel_x - center_x_px
-        dy_px = pixel_y - center_y_px
-
         x_mm = dx_px * self.mm_per_pixel_x
 
-        y_fraction = pixel_y / self.image_height
-        distance_from_camera = self.near_distance_mm + y_fraction * (self.far_distance_mm - self.near_distance_mm)
-        y_mm = distance_from_camera
+        # Y coordinate: map pixel Y to viewing angle, then to ground distance
+        # Normalize pixel position: -0.5 (top) to +0.5 (bottom)
+        y_normalized = (pixel_y / self.image_height) - 0.5
+
+        # Angle from camera optical axis
+        angle_from_center = y_normalized * self.fov_vertical_rad
+
+        # Total angle from horizontal
+        viewing_angle = self.camera_angle_rad + angle_from_center
+
+        # Clamp viewing angle to reasonable range (must be looking down)
+        viewing_angle = np.clip(viewing_angle, 0.087, 1.57)  # 5° to 90°
+
+        # Distance along ground from point directly below camera
+        distance_forward = self.camera_height_mm / np.tan(viewing_angle)
+
+        # Return forward distance (positive = forward of camera)
+        y_mm = distance_forward
 
         return x_mm, y_mm
 
