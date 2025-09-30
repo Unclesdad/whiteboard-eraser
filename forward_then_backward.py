@@ -38,7 +38,7 @@ def main():
         servo = None
         if SERVO_AVAILABLE:
             servo = ServoController(pwm_pin=12)
-            servo.set_angle(0)
+            servo.set_angle(90)
             print("✓ Servo set to angle 0")
 
         # Create dual motor controller with standby pin

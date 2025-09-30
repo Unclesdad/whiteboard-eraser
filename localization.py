@@ -35,7 +35,7 @@ class LocalizationSystem:
     def __init__(self,
                  wheel_base_mm: float = 110.0,  # Distance between front and back wheels
                  wheel_radius_mm: float = 30.0,  # Wheel radius
-                 ticks_per_revolution: int = 28,  # Encoder ticks per wheel revolution
+                 ticks_per_revolution: int = 4445,  # Encoder ticks per wheel revolution (calibrated)
                  track_width_mm: float = 110.0,  # Distance between left and right wheels
                  gyro_weight: float = 0.7,  # How much to trust gyro vs encoder for heading
                  max_position_history: int = 100):
@@ -119,6 +119,9 @@ class LocalizationSystem:
         # Calculate tick differences
         left_delta = left_ticks - self.prev_left_ticks
         right_delta = right_ticks - self.prev_right_ticks
+
+        # Invert right encoder (motor2 encoder is inverted in hardware)
+        right_delta = -right_delta
 
         # Convert to distances
         left_distance = left_delta * self.mm_per_tick
