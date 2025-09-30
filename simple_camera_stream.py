@@ -10,6 +10,7 @@ import threading
 import time
 from threading import Condition
 from http import server
+from dataclasses import dataclass, field
 import cv2
 import numpy as np
 from picamera2 import Picamera2
@@ -30,41 +31,84 @@ PROCESSING_HEIGHT = 360  # Reduced from 720 to save processing power
 PAGE = """\
 <html>
 <head>
-<title>Simple Whiteboard Detection Test</title>
+<title>Whiteboard Detection with Spatial Mapping</title>
 <style>
-body { font-family: Arial, sans-serif; background-color: #f0f0f0; }
-.container { text-align: center; margin: 20px; }
-.stats { background-color: white; padding: 10px; margin: 10px auto; border-radius: 5px; width: 1950px; }
-.video-container { display: flex; justify-content: center; gap: 15px; margin: 20px 0; }
-.video { border: 2px solid #333; border-radius: 5px; }
-.video-label { text-align: center; margin-top: 10px; font-weight: bold; }
+body { font-family: Arial, sans-serif; background-color: #f0f0f0; margin: 0; padding: 10px; }
+.container { text-align: center; max-width: 1400px; margin: 0 auto; }
+.stats { background-color: white; padding: 10px; margin: 10px auto; border-radius: 5px; }
+.video-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin: 20px auto;
+    max-width: 1400px;
+}
+.video-panel {
+    background-color: white;
+    padding: 10px;
+    border-radius: 5px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.video {
+    width: 100%;
+    height: auto;
+    border: 2px solid #333;
+    border-radius: 5px;
+    display: block;
+}
+.video-label {
+    text-align: center;
+    margin-top: 8px;
+    font-weight: bold;
+    font-size: 14px;
+}
+.video-description {
+    text-align: center;
+    margin-top: 5px;
+    font-size: 11px;
+    color: #666;
+}
+h1 { margin: 10px 0; font-size: 24px; }
 </style>
 </head>
 <body>
 <div class="container">
-<h1>Simple Whiteboard Detection Test - Three Panel View</h1>
+<h1>Whiteboard Detection with Spatial Mapping</h1>
 <div class="stats">
-<p><strong>Approach:</strong> Brightness threshold → Find bottom blob → Detect dark spots</p>
+<p><strong>Approach:</strong> Brightness threshold → Bottom blob detection → Dark spot detection → Temporal tracking</p>
 <p><strong>Markings:</strong> <span id="markings">0</span> | <strong>FPS:</strong> <span id="fps">0.0</span></p>
 </div>
-<div class="video-container">
-<div>
-<img src="stream.mjpg" width="640" height="480" class="video">
+
+<div class="video-grid">
+<div class="video-panel">
+<img src="stream.mjpg" class="video">
 <div class="video-label">1. Annotated Camera Feed</div>
+<div class="video-description">Yellow boundary = detected surface, Colored boxes = markings</div>
 </div>
-<div>
-<img src="brightness.mjpg" width="640" height="480" class="video">
+
+<div class="video-panel">
+<img src="brightness.mjpg" class="video">
 <div class="video-label">2. Raw Brightness Mask</div>
+<div class="video-description">Raw brightness thresholding (all pixels above threshold)</div>
 </div>
-<div>
-<img src="surface.mjpg" width="640" height="480" class="video">
+
+<div class="video-panel">
+<img src="surface.mjpg" class="video">
 <div class="video-label">3. Final Surface Blob</div>
+<div class="video-description">Bottom-connected blob selected as whiteboard surface</div>
+</div>
+
+<div class="video-panel">
+<img src="map.mjpg" class="video">
+<div class="video-label">4. Spatial Map (Top-Down)</div>
+<div class="video-description">800x600mm view • Green=Established, Yellow=Medium, Orange=New</div>
 </div>
 </div>
+
 <div class="stats">
-<p><strong>Panel 1:</strong> Yellow boundary = detected surface, Colored boxes = markings</p>
-<p><strong>Panel 2:</strong> Raw brightness thresholding (all pixels above threshold)</p>
-<p><strong>Panel 3:</strong> Bottom-connected blob selected as whiteboard surface</p>
+<p><strong>Spatial Map:</strong> Shows markings tracked over time relative to car position.
+Markings reinforce with repeated detection (merge within 30mm), fade after 10 absent frames.</p>
+<p><strong>Camera:</strong> 7.5cm height, 20.5° down angle, converts pixels → mm displacement → car coordinates</p>
 </div>
 </div>
 <script>
@@ -82,15 +126,28 @@ setInterval(function() {
 </html>
 """
 
+@dataclass
+class TrackedMarking:
+    """Represents a marking tracked over time"""
+    x: float  # mm from car center
+    y: float  # mm from car center
+    confidence: float
+    observation_count: int = 1
+    frames_absent: int = 0
+    first_seen: float = field(default_factory=time.time)
+    last_seen: float = field(default_factory=time.time)
+
 class SimpleDetectionOutput(io.BufferedIOBase):
     def __init__(self):
         self.frame = None
         self.brightness_frame = None
         self.surface_frame = None
+        self.map_frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
         self.brightness_condition = Condition()
         self.surface_condition = Condition()
+        self.map_condition = Condition()
 
         # Simple detection system - configure for processing resolution
         self.detector = SimpleMarkingDetector(
@@ -106,6 +163,12 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         # Raw frame buffer
         self.raw_frame = None
         self.raw_condition = Condition()
+
+        # Temporal tracking of markings
+        self.tracked_markings = []  # List of TrackedMarking
+        self.tracking_lock = threading.Lock()
+        self.merge_distance_mm = 30.0  # Merge markings within 30mm
+        self.forget_threshold = 10  # Forget after 10 absent frames
 
         print("✓ Simple detection system initialized")
 
@@ -175,6 +238,15 @@ class SimpleDetectionOutput(io.BufferedIOBase):
 
                 self.current_markings = scaled_markings
 
+                # Convert markings to car coordinates and update tracking
+                car_markings = []
+                for marking in markings:
+                    cam_x, cam_y = self.detector.pixel_to_camera_relative_mm(marking.x, marking.y)
+                    car_x, car_y = self.detector.camera_relative_to_car_center_mm(cam_x, cam_y)
+                    car_markings.append((car_x, car_y, marking.confidence))
+
+                self._update_tracked_markings(car_markings)
+
                 # Create annotated frame using original resolution
                 annotated_frame = self.detector.visualize_detections(frame, scaled_markings)
 
@@ -186,10 +258,14 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                 surface_frame = self._create_surface_visualization(processing_frame)
                 surface_frame = cv2.resize(surface_frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
 
-                # Convert all three to JPEG
+                # Create map visualization
+                map_frame = self._create_map_visualization()
+
+                # Convert all four to JPEG
                 _, jpeg_data = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 _, brightness_jpeg_data = cv2.imencode('.jpg', brightness_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 _, surface_jpeg_data = cv2.imencode('.jpg', surface_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                _, map_jpeg_data = cv2.imencode('.jpg', map_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
                 # Update streaming buffers
                 with self.condition:
@@ -203,6 +279,10 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                 with self.surface_condition:
                     self.surface_frame = surface_jpeg_data.tobytes()
                     self.surface_condition.notify_all()
+
+                with self.map_condition:
+                    self.map_frame = map_jpeg_data.tobytes()
+                    self.map_condition.notify_all()
 
                 # Increased delay for battery power savings (was 0.05)
                 time.sleep(0.1)  # Reduces to ~10 FPS max
@@ -262,6 +342,150 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
 
         return surface_vis
+
+    def _update_tracked_markings(self, car_markings):
+        """Update temporal tracking of markings with reinforcement and forgetting"""
+        with self.tracking_lock:
+            # Mark all tracked markings as not seen this frame
+            for tracked in self.tracked_markings:
+                tracked.frames_absent += 1
+
+            # Process new detections
+            for car_x, car_y, confidence in car_markings:
+                # Find if this marking matches an existing tracked marking
+                matched = False
+                for tracked in self.tracked_markings:
+                    distance = np.sqrt((tracked.x - car_x)**2 + (tracked.y - car_y)**2)
+                    if distance <= self.merge_distance_mm:
+                        # Reinforce existing marking
+                        total_weight = tracked.confidence * tracked.observation_count + confidence
+                        tracked.x = (tracked.x * tracked.confidence * tracked.observation_count +
+                                   car_x * confidence) / total_weight
+                        tracked.y = (tracked.y * tracked.confidence * tracked.observation_count +
+                                   car_y * confidence) / total_weight
+                        tracked.confidence = min(1.0, total_weight / (tracked.observation_count + 1))
+                        tracked.observation_count += 1
+                        tracked.frames_absent = 0
+                        tracked.last_seen = time.time()
+                        matched = True
+                        break
+
+                if not matched:
+                    # Create new tracked marking
+                    new_tracked = TrackedMarking(
+                        x=car_x,
+                        y=car_y,
+                        confidence=confidence
+                    )
+                    self.tracked_markings.append(new_tracked)
+
+            # Remove markings that have been absent too long
+            self.tracked_markings = [
+                t for t in self.tracked_markings
+                if t.frames_absent < self.forget_threshold
+            ]
+
+    def _create_map_visualization(self):
+        """Create top-down 2D map visualization of tracked markings"""
+        # Map dimensions in pixels
+        map_width = 640
+        map_height = 480
+
+        # View area in mm (800mm x 600mm centered on car)
+        view_width_mm = 800.0
+        view_height_mm = 600.0
+
+        # Scale: pixels per mm
+        scale_x = map_width / view_width_mm
+        scale_y = map_height / view_height_mm
+
+        # Create white background
+        map_img = np.ones((map_height, map_width, 3), dtype=np.uint8) * 255
+
+        # Draw grid (100mm spacing)
+        grid_spacing_mm = 100.0
+        for x_mm in np.arange(-view_width_mm/2, view_width_mm/2, grid_spacing_mm):
+            x_px = int((x_mm + view_width_mm/2) * scale_x)
+            cv2.line(map_img, (x_px, 0), (x_px, map_height), (220, 220, 220), 1)
+
+        for y_mm in np.arange(-view_height_mm/2, view_height_mm/2, grid_spacing_mm):
+            y_px = int((y_mm + view_height_mm/2) * scale_y)
+            cv2.line(map_img, (0, y_px), (map_width, y_px), (220, 220, 220), 1)
+
+        # Draw axes
+        center_x = map_width // 2
+        center_y = map_height // 2
+        cv2.line(map_img, (center_x, 0), (center_x, map_height), (180, 180, 180), 2)
+        cv2.line(map_img, (0, center_y), (map_width, center_y), (180, 180, 180), 2)
+
+        # Draw tracked markings
+        with self.tracking_lock:
+            for tracked in self.tracked_markings:
+                # Convert car coordinates to map pixels
+                # Car center is at map center, forward (positive Y) is up
+                map_x = int(center_x + tracked.x * scale_x)
+                map_y = int(center_y - tracked.y * scale_y)  # Flip Y for screen coordinates
+
+                # Skip if out of bounds
+                if map_x < 0 or map_x >= map_width or map_y < 0 or map_y >= map_height:
+                    continue
+
+                # Color based on confidence and observation count
+                if tracked.observation_count >= 5:
+                    color = (0, 200, 0)  # Green - well established
+                elif tracked.observation_count >= 2:
+                    color = (0, 255, 255)  # Yellow - medium confidence
+                else:
+                    color = (0, 128, 255)  # Orange - new detection
+
+                # Fade if not seen recently
+                if tracked.frames_absent > 0:
+                    fade_factor = 1.0 - (tracked.frames_absent / self.forget_threshold)
+                    color = tuple(int(c * fade_factor + 255 * (1 - fade_factor)) for c in color)
+
+                # Draw marking
+                radius = max(3, int(15 * scale_x))  # ~15mm marking radius
+                cv2.circle(map_img, (map_x, map_y), radius, color, -1)
+                cv2.circle(map_img, (map_x, map_y), radius, (100, 100, 100), 1)
+
+                # Draw observation count
+                if tracked.observation_count > 1:
+                    cv2.putText(map_img, f"{tracked.observation_count}",
+                              (map_x + radius + 2, map_y),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
+
+        # Draw car at center (triangle pointing up/forward)
+        car_size = 30
+        car_points = np.array([
+            [center_x, center_y - car_size],  # Front point
+            [center_x - car_size//2, center_y + car_size//2],  # Back left
+            [center_x + car_size//2, center_y + car_size//2]   # Back right
+        ], np.int32)
+        cv2.fillPoly(map_img, [car_points], (255, 100, 100))
+        cv2.polylines(map_img, [car_points], True, (200, 0, 0), 2)
+
+        # Add legend and info
+        cv2.putText(map_img, "Map View (800x600mm)", (10, 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+        with self.tracking_lock:
+            active_count = len([t for t in self.tracked_markings if t.frames_absent == 0])
+            total_count = len(self.tracked_markings)
+
+        cv2.putText(map_img, f"Markings: {active_count} active / {total_count} total",
+                   (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+        cv2.putText(map_img, "Green=Established, Yellow=Medium, Orange=New",
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
+
+        # Add scale reference
+        scale_length_mm = 100.0
+        scale_length_px = int(scale_length_mm * scale_x)
+        scale_y_pos = map_height - 20
+        cv2.line(map_img, (10, scale_y_pos), (10 + scale_length_px, scale_y_pos), (0, 0, 0), 2)
+        cv2.putText(map_img, "100mm", (15, scale_y_pos - 5),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+
+        return map_img
 
     def write(self, buf):
         """Handle incoming camera data"""
@@ -371,6 +595,27 @@ class SimpleStreamingHandler(server.BaseHTTPRequestHandler):
                         self.wfile.write(b'\r\n')
             except Exception as e:
                 print(f'Removed surface streaming client {self.client_address}: {e}')
+        elif self.path == '/map.mjpg':
+            self.send_response(200)
+            self.send_header('Age', 0)
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
+            self.end_headers()
+            try:
+                while True:
+                    with output.map_condition:
+                        output.map_condition.wait()
+                        frame = output.map_frame
+                    if frame:
+                        self.wfile.write(b'--FRAME\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', len(frame))
+                        self.end_headers()
+                        self.wfile.write(frame)
+                        self.wfile.write(b'\r\n')
+            except Exception as e:
+                print(f'Removed map streaming client {self.client_address}: {e}')
         else:
             self.send_error(404)
             self.end_headers()

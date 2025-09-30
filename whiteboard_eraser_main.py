@@ -33,7 +33,6 @@ class EraserState(Enum):
     """Main state machine states"""
     INITIALIZING = "initializing"
     STARTUP_DELAY = "startup_delay"
-    CALIBRATING_ENCODERS = "calibrating_encoders"
     WHITEBOARD_MAPPING = "whiteboard_mapping"
     INITIAL_SCAN = "initial_scan"
     SCANNING = "scanning"
@@ -71,8 +70,6 @@ class EraserConfig:
     # Startup calibration settings
     startup_delay: float = 12.0  # seconds to wait for gyro calibration + system init
     gyro_calibration_samples: int = 1000  # gyro calibration samples
-    calibration_distance_mm: float = 200.0  # distance to move for encoder calibration
-    calibration_speed: float = 0.3  # speed during calibration (0-1)
     whiteboard_mapping_time: float = 20.0  # seconds to map whiteboard orientation
     circle_scan_time: float = 15.0  # seconds for additional marking scan
     circle_radius_mm: float = 300.0  # radius of scanning circle
@@ -126,10 +123,9 @@ class WhiteboardEraserMain:
         self.total_markings_erased = 0
         self.total_distance_traveled = 0.0
 
-        # Encoder calibration data
+        # Encoder calibration data (removed - not needed)
         self.left_encoder_scale = 1.0
         self.right_encoder_scale = 1.0
-        self.encoder_calibrated = False
 
         # Whiteboard orientation mapping
         self.whiteboard_right_angle = 0.0  # Gyro angle pointing to right edge (start position)
@@ -177,8 +173,6 @@ class WhiteboardEraserMain:
 
             # Initialize localization
             self.localization = LocalizationSystem()
-            # Try to load previous encoder calibration
-            self._load_encoder_calibration()
             # Try to load previous whiteboard orientation
             self._load_whiteboard_orientation()
             print("✓ Localization system initialized")
@@ -273,9 +267,6 @@ class WhiteboardEraserMain:
 
                 if current_state == EraserState.STARTUP_DELAY:
                     self._handle_startup_delay_state()
-
-                elif current_state == EraserState.CALIBRATING_ENCODERS:
-                    self._handle_encoder_calibration_state()
 
                 elif current_state == EraserState.WHITEBOARD_MAPPING:
                     self._handle_whiteboard_mapping_state()
@@ -385,95 +376,8 @@ class WhiteboardEraserMain:
         # Wait for full startup delay
         if elapsed_time >= self.config.startup_delay and self.gyro_calibration_complete:
             print(f"✓ Startup delay complete ({self.config.startup_delay}s)")
-            print("🔧 Starting encoder calibration...")
-            with self.state_lock:
-                self.state = EraserState.CALIBRATING_ENCODERS
-                self.state_start_time = time.time()
-        else:
-            remaining = max(0, self.config.startup_delay - elapsed_time)
-            if int(elapsed_time) % 2 == 0 and elapsed_time > 0:  # Print every 2 seconds
-                gyro_status = "✓" if self.gyro_calibration_complete else "⏳"
-                print(f"⏱️  Startup: {remaining:.1f}s remaining, Gyro: {gyro_status}")
 
-    def _handle_encoder_calibration_state(self):
-        """Handle encoder calibration - move forward then backward to calibrate encoder scaling"""
-        elapsed_time = time.time() - self.state_start_time
-
-        # Get current encoder readings
-        left_ticks = self.car_controller.left_motor.get_encoder_count()
-        right_ticks = self.car_controller.right_motor.get_encoder_count()
-
-        if elapsed_time < 1.0:
-            # Reset encoders and start
-            if elapsed_time < 0.1:
-                self.car_controller.left_motor.reset_encoder()
-                self.car_controller.right_motor.reset_encoder()
-                self.initial_left_ticks = 0
-                self.initial_right_ticks = 0
-                print("📏 Encoder calibration starting - moving forward...")
-
-        elif elapsed_time < 4.0:
-            # Move forward for 3 seconds
-            self.car_controller.set_manual_control(self.config.calibration_speed, 0.0)
-
-        elif elapsed_time < 5.0:
-            # Stop and record forward readings
-            self.car_controller.stop_all_motors()
-            if not hasattr(self, 'forward_left_ticks'):
-                self.forward_left_ticks = abs(left_ticks)
-                self.forward_right_ticks = abs(right_ticks)
-                print(f"📏 Forward motion: L={self.forward_left_ticks}, R={self.forward_right_ticks}")
-
-        elif elapsed_time < 8.0:
-            # Move backward for 3 seconds
-            self.car_controller.set_manual_control(-self.config.calibration_speed, 0.0)
-
-        elif elapsed_time < 9.0:
-            # Stop and record backward readings
-            self.car_controller.stop_all_motors()
-            if not hasattr(self, 'backward_left_ticks'):
-                self.backward_left_ticks = abs(left_ticks - self.forward_left_ticks)
-                self.backward_right_ticks = abs(right_ticks - self.forward_right_ticks)
-                print(f"📏 Backward motion: L={self.backward_left_ticks}, R={self.backward_right_ticks}")
-
-        else:
-            # Calculate calibration factors
-            if hasattr(self, 'forward_left_ticks') and hasattr(self, 'backward_left_ticks'):
-                # Average forward and backward readings
-                avg_left = (self.forward_left_ticks + self.backward_left_ticks) / 2.0
-                avg_right = (self.forward_right_ticks + self.backward_right_ticks) / 2.0
-
-                if avg_left > 0 and avg_right > 0:
-                    # Calculate scaling factors to equalize encoder readings
-                    target_count = max(avg_left, avg_right)
-                    self.left_encoder_scale = target_count / avg_left
-                    self.right_encoder_scale = target_count / avg_right
-                    self.encoder_calibrated = True
-
-                    print(f"✓ Encoder calibration complete:")
-                    print(f"  Left scale: {self.left_encoder_scale:.3f}")
-                    print(f"  Right scale: {self.right_encoder_scale:.3f}")
-
-                    # Save calibration to file for future use
-                    try:
-                        import json
-                        calibration_data = {
-                            'left_encoder_scale': self.left_encoder_scale,
-                            'right_encoder_scale': self.right_encoder_scale,
-                            'timestamp': time.time()
-                        }
-                        with open('encoder_calibration.json', 'w') as f:
-                            json.dump(calibration_data, f, indent=2)
-                        print("💾 Calibration saved to encoder_calibration.json")
-                    except Exception as e:
-                        print(f"⚠️ Could not save calibration: {e}")
-
-                else:
-                    print("❌ Encoder calibration failed - no movement detected")
-                    self.left_encoder_scale = 1.0
-                    self.right_encoder_scale = 1.0
-
-            # Reset position and decide next step
+            # Reset position
             self.localization.reset_position(0, 0, 0)
 
             if self.whiteboard_mapped:
@@ -487,6 +391,11 @@ class WhiteboardEraserMain:
                 with self.state_lock:
                     self.state = EraserState.WHITEBOARD_MAPPING
                     self.state_start_time = time.time()
+        else:
+            remaining = max(0, self.config.startup_delay - elapsed_time)
+            if int(elapsed_time) % 2 == 0 and elapsed_time > 0:  # Print every 2 seconds
+                gyro_status = "✓" if self.gyro_calibration_complete else "⏳"
+                print(f"⏱️  Startup: {remaining:.1f}s remaining, Gyro: {gyro_status}")
 
     def _handle_whiteboard_mapping_state(self):
         """Handle whiteboard orientation mapping - drive in circle to map gyro angles to whiteboard directions"""
@@ -842,16 +751,11 @@ class WhiteboardEraserMain:
         print(f"\n📊 Status (t={elapsed_time:.0f}s):")
         print(f"  State: {current_state.value}")
 
-        if current_state not in [EraserState.STARTUP_DELAY, EraserState.CALIBRATING_ENCODERS]:
+        if current_state not in [EraserState.STARTUP_DELAY]:
             print(f"  Position: ({pose.x:.1f}, {pose.y:.1f}), θ={np.degrees(pose.theta):.1f}°")
             print(f"  Car: {car_status.state.value}, speed={car_status.linear_velocity:.1f}mm/s")
             print(f"  Markings: {progress['total_detected']} detected, {progress['total_erased']} erased")
             print(f"  Progress: {progress['progress_percent']:.1f}%")
-
-        if self.encoder_calibrated:
-            print(f"  Encoders: L×{self.left_encoder_scale:.2f}, R×{self.right_encoder_scale:.2f}")
-        else:
-            print(f"  Encoders: Not calibrated")
 
         if self.whiteboard_mapped:
             print(f"  Whiteboard: Up={np.degrees(self.whiteboard_up_angle):.0f}°, Down={np.degrees(self.whiteboard_down_angle):.0f}°")
@@ -915,30 +819,6 @@ class WhiteboardEraserMain:
             self.camera_thread.join(timeout=2.0)
 
         print("✓ Shutdown complete")
-
-    def _load_encoder_calibration(self):
-        """Load encoder calibration from previous run if available"""
-        try:
-            import json
-            with open('encoder_calibration.json', 'r') as f:
-                calibration_data = json.load(f)
-
-            self.left_encoder_scale = calibration_data.get('left_encoder_scale', 1.0)
-            self.right_encoder_scale = calibration_data.get('right_encoder_scale', 1.0)
-            self.encoder_calibrated = True
-
-            print(f"📏 Loaded encoder calibration: L={self.left_encoder_scale:.3f}, R={self.right_encoder_scale:.3f}")
-
-        except FileNotFoundError:
-            print("📏 No previous encoder calibration found - will calibrate on startup")
-            self.left_encoder_scale = 1.0
-            self.right_encoder_scale = 1.0
-            self.encoder_calibrated = False
-        except Exception as e:
-            print(f"⚠️ Error loading encoder calibration: {e}")
-            self.left_encoder_scale = 1.0
-            self.right_encoder_scale = 1.0
-            self.encoder_calibrated = False
 
     def _load_whiteboard_orientation(self):
         """Load whiteboard orientation from previous run if available"""
@@ -1010,20 +890,13 @@ class WhiteboardEraserMain:
             return 'right'
 
     def _update_localization_with_calibrated_encoders(self):
-        """Update localization using calibrated encoder readings"""
-        if not self.encoder_calibrated:
-            return
+        """Update localization using encoder readings"""
+        # Get encoder counts
+        left_ticks = self.car_controller.left_motor.get_encoder_count()
+        right_ticks = self.car_controller.right_motor.get_encoder_count()
 
-        # Get raw encoder counts
-        raw_left = self.car_controller.left_motor.get_encoder_count()
-        raw_right = self.car_controller.right_motor.get_encoder_count()
-
-        # Apply calibration scaling
-        calibrated_left = int(raw_left * self.left_encoder_scale)
-        calibrated_right = int(raw_right * self.right_encoder_scale)
-
-        # Update localization with calibrated values
-        self.localization.update_with_encoders(calibrated_left, calibrated_right)
+        # Update localization
+        self.localization.update_with_encoders(left_ticks, right_ticks)
 
         # Also update with gyro if available
         try:
