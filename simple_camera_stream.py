@@ -101,7 +101,7 @@ h1 { margin: 10px 0; font-size: 24px; }
 <div class="video-panel">
 <img src="map.mjpg" class="video">
 <div class="video-label">4. Spatial Map (Top-Down)</div>
-<div class="video-description">400x300mm view • Green=Established, Yellow=Medium, Orange=New</div>
+<div class="video-description">800x600mm view • Green=Established, Yellow=Medium, Orange=New</div>
 </div>
 </div>
 
@@ -394,10 +394,9 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         map_width = 640
         map_height = 480
 
-        # View area in mm - larger range for low camera height
-        # Camera at 7.5cm sees markings relatively close
-        view_width_mm = 400.0  # ±200mm left/right
-        view_height_mm = 300.0  # 300mm forward (camera points forward)
+        # View area in mm - zoomed out for wider view
+        view_width_mm = 800.0  # ±400mm left/right
+        view_height_mm = 600.0  # 600mm forward (camera points forward)
 
         # Scale: pixels per mm
         scale_x = map_width / view_width_mm
@@ -491,11 +490,11 @@ class SimpleDetectionOutput(io.BufferedIOBase):
                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
 
         # Add scale reference
-        scale_length_mm = 50.0  # Smaller scale for smaller view
+        scale_length_mm = 100.0  # Scale bar for zoomed out view
         scale_length_px = int(scale_length_mm * scale_x)
         scale_y_pos = map_height - 20
         cv2.line(map_img, (10, scale_y_pos), (10 + scale_length_px, scale_y_pos), (0, 0, 0), 2)
-        cv2.putText(map_img, "50mm", (15, scale_y_pos - 5),
+        cv2.putText(map_img, "100mm", (15, scale_y_pos - 5),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
 
         return map_img
