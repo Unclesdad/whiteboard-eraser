@@ -18,13 +18,29 @@ except ImportError as e:
     print("Make sure motor.py contains the N20Motor classes")
     sys.exit(1)
 
+# Try to import ServoController
+try:
+    from servo import ServoController
+    SERVO_AVAILABLE = True
+    print("✓ Successfully imported ServoController")
+except ImportError as e:
+    SERVO_AVAILABLE = False
+    print(f"⚠ Servo not available: {e}")
+
 def main():
     print("=== Forward Then Backward N20 Motor Test ===")
     print("Setting up dual motor controller...")
-    
+
     # gpiozero handles GPIO setup automatically
-    
+
     try:
+        # Initialize servo to angle 0 if available
+        servo = None
+        if SERVO_AVAILABLE:
+            servo = ServoController(pwm_pin=12)
+            servo.set_angle(0)
+            print("✓ Servo set to angle 0")
+
         # Create dual motor controller with standby pin
         controller = DualMotorController(standby_pin=22)
         
@@ -155,11 +171,13 @@ def main():
                 motor2.stop()
             if 'controller' in locals():
                 controller.cleanup()
+            if 'servo' in locals() and servo is not None:
+                servo.cleanup()
             time.sleep(0.5)
             # gpiozero handles cleanup automatically
         except Exception as e:
             print(f"Cleanup error: {e}")
-        
+
         print("✓ Motors stopped and GPIO cleaned up.")
 
 if __name__ == '__main__':
