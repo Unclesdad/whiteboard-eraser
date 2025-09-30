@@ -101,7 +101,7 @@ h1 { margin: 10px 0; font-size: 24px; }
 <div class="video-panel">
 <img src="map.mjpg" class="video">
 <div class="video-label">4. Spatial Map (Top-Down)</div>
-<div class="video-description">800x600mm view • Green=Established, Yellow=Medium, Orange=New</div>
+<div class="video-description">1000x900mm view • Green=Established, Yellow=Medium, Orange=New</div>
 </div>
 </div>
 
@@ -394,9 +394,9 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         map_width = 640
         map_height = 480
 
-        # View area in mm - zoomed out for wider view
-        view_width_mm = 800.0  # ±400mm left/right
-        view_height_mm = 600.0  # 600mm forward (camera points forward)
+        # View area in mm - zoomed out to capture distant markings
+        view_width_mm = 1000.0  # ±500mm left/right
+        view_height_mm = 900.0  # 900mm forward (camera points forward)
 
         # Scale: pixels per mm
         scale_x = map_width / view_width_mm
@@ -422,6 +422,7 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         cv2.line(map_img, (0, center_y), (map_width, center_y), (180, 180, 180), 2)
 
         # Draw tracked markings
+        skipped_count = 0
         with self.tracking_lock:
             for tracked in self.tracked_markings:
                 # Convert car coordinates to map pixels
@@ -431,6 +432,7 @@ class SimpleDetectionOutput(io.BufferedIOBase):
 
                 # Skip if out of bounds
                 if map_x < 0 or map_x >= map_width or map_y < 0 or map_y >= map_height:
+                    skipped_count += 1
                     continue
 
                 # Color based on confidence and observation count
@@ -476,18 +478,26 @@ class SimpleDetectionOutput(io.BufferedIOBase):
             total_count = len(self.tracked_markings)
 
             # Debug: show position range of markings
+            debug_y_offset = 80
             if total_count > 0:
                 x_positions = [t.x for t in self.tracked_markings]
                 y_positions = [t.y for t in self.tracked_markings]
                 x_range = f"X:[{min(x_positions):.0f},{max(x_positions):.0f}]"
                 y_range = f"Y:[{min(y_positions):.0f},{max(y_positions):.0f}]"
                 cv2.putText(map_img, f"{x_range} {y_range}",
-                           (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
+                           (10, debug_y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
+                debug_y_offset += 20
 
         cv2.putText(map_img, f"Markings: {active_count} active / {total_count} total",
                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+
+        # Show how many are out of view
+        if skipped_count > 0:
+            cv2.putText(map_img, f"({skipped_count} out of view)",
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (150, 0, 0), 1)
+
         cv2.putText(map_img, "Green=Established, Yellow=Medium, Orange=New",
-                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
+                   (10, debug_y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
 
         # Add scale reference
         scale_length_mm = 100.0  # Scale bar for zoomed out view
