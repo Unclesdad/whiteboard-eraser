@@ -42,11 +42,15 @@ class SimpleMarkingDetector:
         self.image_height = image_height
         self.debug = debug
 
-        # Simple detection parameters - very permissive for debugging
-        self.min_marking_area = 5   # Even smaller minimum
-        self.max_marking_area = 2000 # Larger maximum
-        self.marking_threshold = 120  # Much higher threshold - pen marks are darker than this
+        # Simple detection parameters - tuned for actual markings vs reflections
+        self.min_marking_area = 2    # Ignore 1-pixel noise
+        self.max_marking_area = 100  # Reject large solid blobs (reflections)
+        self.marking_threshold = 120  # Darkness threshold - pen marks are darker than this
         self.gaussian_blur_size = 3
+
+        # Shape filtering to distinguish markings from reflections
+        self.max_solidity = 0.85  # Solid blobs (reflections) have solidity near 1.0
+                                  # Markings (thin strokes) have lower solidity
 
         # Edge exclusion parameters
         self.edge_exclusion_pixels = 15  # Exclude markings within 15 pixels of whiteboard edge
@@ -160,6 +164,61 @@ class SimpleMarkingDetector:
 
         return surface_mask
 
+    def _analyze_blob_shape(self, contour: np.ndarray) -> dict:
+        """
+        Analyze blob shape to distinguish markings from reflections
+
+        Returns:
+            dict with shape metrics: solidity, aspect_ratio, perimeter_area_ratio
+        """
+        area = cv2.contourArea(contour)
+
+        # Calculate solidity (area / convex hull area)
+        # Solid blobs (reflections) have solidity near 1.0
+        # Thin irregular markings have lower solidity
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 0.0
+
+        # Calculate aspect ratio
+        x, y, w, h = cv2.boundingRect(contour)
+        aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 1.0
+
+        # Calculate perimeter to area ratio
+        # Thin markings have high ratio, solid blobs have low ratio
+        perimeter = cv2.arcLength(contour, True)
+        perimeter_area_ratio = perimeter / area if area > 0 else 0.0
+
+        return {
+            'solidity': solidity,
+            'aspect_ratio': aspect_ratio,
+            'perimeter_area_ratio': perimeter_area_ratio,
+            'area': area
+        }
+
+    def _is_likely_marking(self, shape_metrics: dict) -> tuple[bool, str]:
+        """
+        Determine if blob is likely a marking (vs reflection)
+
+        Returns:
+            (is_marking, reason)
+        """
+        area = shape_metrics['area']
+        solidity = shape_metrics['solidity']
+
+        # Check area bounds
+        if area < self.min_marking_area:
+            return False, f"too_small ({area:.1f}px < {self.min_marking_area})"
+
+        if area > self.max_marking_area:
+            return False, f"too_large ({area:.1f}px > {self.max_marking_area})"
+
+        # Check solidity - reject solid blobs (reflections)
+        if solidity > self.max_solidity:
+            return False, f"too_solid (solidity={solidity:.2f})"
+
+        return True, "valid_marking"
+
     def _create_edge_exclusion_mask(self, white_surface_mask: np.ndarray) -> np.ndarray:
         """
         Create a mask that excludes only areas near the whiteboard boundary,
@@ -266,37 +325,66 @@ class SimpleMarkingDetector:
                 print(f"  Overlap (should be holes): {overlap_pixels}")
 
         markings = []
+        rejected_count = {'too_small': 0, 'too_large': 0, 'too_solid': 0, 'near_edge': 0}
+
         for contour in contours:
-            area = cv2.contourArea(contour)
+            # Analyze blob shape
+            shape_metrics = self._analyze_blob_shape(contour)
+            is_marking, reason = self._is_likely_marking(shape_metrics)
 
-            # Simple area filtering - detect holes of reasonable size
-            min_area = 1    # Very low minimum to catch small markings
-            max_area = 5000 # Maximum area to avoid detecting large edge artifacts
+            if self.debug and len(markings) < 10:  # Only print first 10 for brevity
+                area = shape_metrics['area']
+                solidity = shape_metrics['solidity']
+                print(f"    Contour {len(markings)}: area={area:.1f}, solidity={solidity:.2f}, {reason}")
 
-            if self.debug:
-                print(f"    Contour {len(markings)}: area={area:.1f}, range={min_area}-{max_area}")
+            if not is_marking:
+                # Track rejection reason
+                if 'too_small' in reason:
+                    rejected_count['too_small'] += 1
+                elif 'too_large' in reason:
+                    rejected_count['too_large'] += 1
+                elif 'too_solid' in reason:
+                    rejected_count['too_solid'] += 1
+                continue
 
-            if min_area <= area <= max_area:
-                # Get bounding box
-                x, y, w, h = cv2.boundingRect(contour)
-                center_x = x + w / 2
-                center_y = y + h / 2
+            # Get bounding box
+            x, y, w, h = cv2.boundingRect(contour)
+            center_x = x + w / 2
+            center_y = y + h / 2
 
-                # Check if marking center is within detection area (not too close to edges)
-                if detection_mask[int(center_y), int(center_x)] > 0:
-                    # Simple confidence based on area - larger holes are more likely to be actual markings
-                    area_score = min(1.0, area / 200.0)  # Normalize to 0-1 scale
-                    confidence = max(0.3, min(1.0, area_score))  # Ensure minimum confidence
+            # Check if marking center is within detection area (not too close to edges)
+            if detection_mask[int(center_y), int(center_x)] > 0:
+                # Improved confidence scoring:
+                # - Smaller irregular shapes = higher confidence (likely markings)
+                # - Larger solid shapes = lower confidence (likely reflections)
+                area = shape_metrics['area']
+                solidity = shape_metrics['solidity']
 
-                    marking = Marking(
-                        x=center_x,
-                        y=center_y,
-                        area=area,
-                        confidence=confidence,
-                        bbox=(x, y, w, h)
-                    )
-                    markings.append(marking)
-                elif self.debug:
+                # Area score: smaller is better (inverse relationship)
+                # Scale from min_area to max_area, smaller = higher score
+                area_score = 1.0 - ((area - self.min_marking_area) /
+                                   (self.max_marking_area - self.min_marking_area))
+                area_score = max(0.0, min(1.0, area_score))
+
+                # Solidity score: lower solidity = higher score (irregular is good)
+                # Invert so that low solidity (0.3) → high score (0.9)
+                solidity_score = 1.0 - solidity
+
+                # Combine scores with weights
+                confidence = (area_score * 0.4 + solidity_score * 0.6)
+                confidence = max(0.2, min(1.0, confidence))  # Clamp to [0.2, 1.0]
+
+                marking = Marking(
+                    x=center_x,
+                    y=center_y,
+                    area=area,
+                    confidence=confidence,
+                    bbox=(x, y, w, h)
+                )
+                markings.append(marking)
+            else:
+                rejected_count['near_edge'] += 1
+                if self.debug and len(markings) < 5:
                     print(f"    Skipped contour at ({center_x:.0f},{center_y:.0f}) - too close to edge")
 
         # Track processing time
@@ -306,21 +394,22 @@ class SimpleMarkingDetector:
             self.processing_times.pop(0)
 
         if self.debug:
-            avg_time = np.mean(self.processing_times)
             print(f"  Detected {len(markings)} markings in {processing_time*1000:.1f}ms")
             white_area = np.sum(white_surface_mask) / 255.0
             holes_area = np.sum(holes_cleaned) / 255.0
             contour_count = len(contours)
-            print(f"  Simple hole detection: White={white_area:.0f}px, Holes={holes_area:.0f}px, Contours={contour_count}")
+            print(f"  Blob detection: White={white_area:.0f}px, Holes={holes_area:.0f}px, Contours={contour_count}")
 
-            # Show actual areas of first few contours for debugging
-            if len(contours) > 0:
-                areas = [cv2.contourArea(c) for c in contours[:5]]  # First 5 contours
-                print(f"  First 5 hole areas: {areas}")
+            # Show rejection statistics
+            total_rejected = sum(rejected_count.values())
+            print(f"  Rejections: {total_rejected} total")
+            print(f"    - Too small (<{self.min_marking_area}px): {rejected_count['too_small']}")
+            print(f"    - Too large (>{self.max_marking_area}px): {rejected_count['too_large']}")
+            print(f"    - Too solid (>{self.max_solidity}): {rejected_count['too_solid']}")
+            print(f"    - Near edge: {rejected_count['near_edge']}")
 
-            # Show how many were filtered by edge detection
-            edge_filtered = contour_count - len(markings)
-            print(f"  Markings detected: {len(markings)}, Edge-filtered: {edge_filtered}")
+            # Show accepted markings count
+            print(f"  ✓ Accepted markings: {len(markings)}")
 
         return markings
 
