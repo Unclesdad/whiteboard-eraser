@@ -51,12 +51,12 @@ class ServoController:
     def set_angle(self, angle):
         """
         Set servo angle.
-        
+
         Args:
-            angle: Servo angle from 0 to 180 degrees
+            angle: Servo angle from 45 to 135 degrees (45=left, 90=center, 135=right)
         """
-        # Clamp angle to valid range
-        angle = max(0, min(180, angle))
+        # Clamp angle to valid range (±45° from center)
+        angle = max(45, min(135, angle))
         
         # Convert angle to duty cycle
         # 0 degrees = 1ms pulse = 2% duty cycle at 50Hz

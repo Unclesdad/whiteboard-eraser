@@ -59,7 +59,7 @@ class CarConfig:
         self.width = 150.0  # Total car width
 
         # Steering constraints
-        self.max_steering_angle = np.radians(32.0)  # Max steering angle
+        self.max_steering_angle = np.radians(45.0)  # Max steering angle (±45° from center)
         self.min_turning_radius = self.wheelbase / np.tan(self.max_steering_angle)
 
         # Motion constraints

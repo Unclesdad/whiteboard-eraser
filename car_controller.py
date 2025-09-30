@@ -243,7 +243,7 @@ class CarController:
         self.running = False
 
         # Safety limits
-        self.max_steering_angle = 32.0  # degrees
+        self.max_steering_angle = 45.0  # degrees (±45° from center)
         self.emergency_stop_flag = False
 
         print(f"CarController initialized:")
@@ -548,7 +548,7 @@ class CarController:
 
         # Convert to servo position (90° = center)
         servo_angle = 90 + angle_degrees
-        servo_angle = np.clip(servo_angle, 58, 122)  # ±32° from center
+        servo_angle = np.clip(servo_angle, 45, 135)  # ±45° from center
 
         self.servo.set_angle(int(servo_angle))
 
