@@ -2,6 +2,7 @@
 """
 Circle Test - Drive in circles both directions
 Tests Ackermann steering by driving in full circles with servo at max angles.
+Uses gyroscope to ensure precise 180° turns.
 """
 
 import time
@@ -26,14 +27,40 @@ except ImportError as e:
     print(f"⚠ Servo not available: {e}")
     sys.exit(1)
 
+# Try to import Gyro
+try:
+    from gyro import RCCarGyro
+    GYRO_AVAILABLE = True
+    print("✓ Successfully imported RCCarGyro")
+except ImportError as e:
+    GYRO_AVAILABLE = False
+    print(f"⚠ Gyro not available: {e}")
+    sys.exit(1)
+
 def main():
     print("=== Circle Test - Drive in Full Circles ===")
-    print("This test will drive the car in two complete circles:")
-    print("  1. Left turn circle (servo at 45°)")
-    print("  2. Right turn circle (servo at 135°)")
+    print("This test will drive the car in two 180° semicircles:")
+    print("  1. Left turn semicircle (servo at 45°)")
+    print("  2. Right turn semicircle (servo at 135°)")
+    print("Using gyroscope for precise 180° turns")
     print()
 
     try:
+        # Initialize gyro
+        print("Initializing gyroscope...")
+        gyro = RCCarGyro()
+        print("✓ Gyroscope initialized")
+
+        # Calibrate gyro (MUST be stationary!)
+        print("\n⚠️  KEEP CAR STATIONARY for calibration...")
+        time.sleep(2)
+        gyro.calibrate(samples=500, show_progress=True)
+
+        # Start continuous gyro updates
+        gyro.start_continuous_update(update_rate=50)
+        print("✓ Gyro continuous updates started at 50Hz")
+        time.sleep(0.5)
+
         # Initialize servo
         servo = ServoController(pwm_pin=12)
         servo.set_angle(90)  # Start at center
@@ -75,17 +102,31 @@ def main():
         motor1.reset_encoder()
         motor2.reset_encoder()
 
-        def drive_circle(servo_angle, direction_name, duration):
-            """Drive in a circle at specified servo angle"""
+        def normalize_angle_change(start, current):
+            """Calculate angle change handling wraparound at ±180°"""
+            delta = current - start
+            # Normalize to [-180, 180]
+            while delta > 180:
+                delta -= 360
+            while delta < -180:
+                delta += 360
+            return delta
+
+        def drive_circle(servo_angle, direction_name):
+            """Drive in a 180° semicircle at specified servo angle"""
             print(f"\n{'='*60}")
-            print(f"--- {direction_name} Circle (servo at {servo_angle}°) ---")
-            print(f"Duration: {duration} seconds")
+            print(f"--- {direction_name} Semicircle (servo at {servo_angle}°) ---")
+            print(f"Target: 180° turn")
             print(f"{'='*60}\n")
 
             # Set servo angle
             servo.set_angle(servo_angle)
             print(f"✓ Servo set to {servo_angle}°")
             time.sleep(0.5)  # Let servo reach position
+
+            # Record starting heading
+            _, _, start_heading = gyro.get_orientation()
+            print(f"Starting heading: {start_heading:.1f}°")
 
             # Start motors at full speed
             power = 1.0  # 100% power
@@ -95,47 +136,67 @@ def main():
 
             start_count1 = motor1.get_encoder_count()
             start_count2 = motor2.get_encoder_count()
+            start_time = time.time()
 
-            # Run for specified duration with progress updates
-            print(f"\nDriving in circle...")
-            for i in range(int(duration)):
-                time.sleep(1)
-                current1 = motor1.get_encoder_count()
-                current2 = motor2.get_encoder_count()
-                delta1 = current1 - start_count1
-                delta2 = current2 - start_count2
-                print(f"  {i+1}s: Motor1={delta1:5d} counts, Motor2={delta2:5d} counts")
+            # Drive until 180° turn complete
+            print(f"\nDriving semicircle (target: 180°)...")
+            loop_count = 0
+            while True:
+                time.sleep(0.1)  # 10Hz polling
+                loop_count += 1
+
+                # Get current heading
+                _, _, current_heading = gyro.get_orientation()
+                heading_change = normalize_angle_change(start_heading, current_heading)
+
+                # Print progress every second
+                if loop_count % 10 == 0:
+                    elapsed = time.time() - start_time
+                    current1 = motor1.get_encoder_count()
+                    current2 = motor2.get_encoder_count()
+                    delta1 = current1 - start_count1
+                    delta2 = current2 - start_count2
+                    print(f"  {elapsed:.1f}s: Heading={heading_change:+6.1f}° | M1={delta1:5d} M2={delta2:5d}")
+
+                # Check if we've completed 180° turn
+                if abs(heading_change) >= 180.0:
+                    break
 
             # Stop motors
             motor1.stop()
             motor2.stop()
+            elapsed_time = time.time() - start_time
 
             # Report final movement
             end_count1 = motor1.get_encoder_count()
             end_count2 = motor2.get_encoder_count()
             total1 = end_count1 - start_count1
             total2 = end_count2 - start_count2
+            _, _, final_heading = gyro.get_orientation()
+            actual_turn = normalize_angle_change(start_heading, final_heading)
 
-            print(f"\n✓ Circle complete!")
-            print(f"  Motor1 total: {total1:+6d} counts ({abs(total1)/duration:.1f} cps)")
-            print(f"  Motor2 total: {total2:+6d} counts ({abs(total2)/duration:.1f} cps)")
+            print(f"\n✓ Semicircle complete!")
+            print(f"  Time: {elapsed_time:.1f} seconds")
+            print(f"  Actual turn: {actual_turn:+.1f}° (target: 180°)")
+            print(f"  Motor1 total: {total1:+6d} counts ({abs(total1)/elapsed_time:.1f} cps)")
+            print(f"  Motor2 total: {total2:+6d} counts ({abs(total2)/elapsed_time:.1f} cps)")
 
             # Return servo to center
             servo.set_angle(90)
             print(f"✓ Servo returned to center")
             time.sleep(1)
 
-        print("\nStarting circle tests...")
+        print("\nStarting semicircle tests...")
 
-        # Test 1: Left turn circle (servo at 45°)
-        drive_circle(45, "LEFT TURN", duration=8)
+        # Test 1: Left turn semicircle (servo at 45°)
+        drive_circle(45, "LEFT TURN")
 
-        # Pause between circles
-        print("\n⏸  Pausing 2 seconds before next circle...")
+        # Pause between semicircles
+        print("\n⏸  Pausing 2 seconds before next semicircle...")
         time.sleep(2)
 
-        # Test 2: Right turn circle (servo at 135°)
-        drive_circle(135, "RIGHT TURN", duration=8)
+        # Test 2: Right turn semicircle (servo at 135°)
+        drive_circle(135, "RIGHT TURN")
 
         # Final report
         print(f"\n{'='*60}")
@@ -172,6 +233,8 @@ def main():
                 servo.set_angle(90)  # Center servo before cleanup
                 time.sleep(0.2)
                 servo.cleanup()
+            if 'gyro' in locals():
+                gyro.stop_continuous_update()
             time.sleep(0.5)
         except Exception as e:
             print(f"Cleanup error: {e}")

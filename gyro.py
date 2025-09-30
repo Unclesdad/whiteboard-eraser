@@ -211,8 +211,8 @@ class RCCarGyro:
             self.angle_y = self.alpha * gyro_angle_y + (1 - self.alpha) * accel_angle_y
             
             # Z angle (yaw) - only from gyroscope integration
-            # For RC car, this tracks heading changes
-            self.angle_z += gyro_z * dt
+            # For whiteboard car: rotation around X-axis (perpendicular to surface)
+            self.angle_z += gyro_x * dt
             
             # Prevent Z angle from growing too large
             if self.angle_z > 180:
