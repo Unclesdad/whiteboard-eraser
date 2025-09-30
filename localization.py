@@ -133,17 +133,23 @@ class LocalizationSystem:
         angular_velocity = heading_change / dt
 
         with self.pose_lock:
-            # Update pose using differential drive kinematics
-            cos_theta = np.cos(self.current_pose.theta)
-            sin_theta = np.sin(self.current_pose.theta)
-
-            # Update position
-            new_x = self.current_pose.x + forward_distance * cos_theta
-            new_y = self.current_pose.y + forward_distance * sin_theta
-            new_theta = self.current_pose.theta + heading_change
-
-            # Normalize angle to [-pi, pi]
+            # Update pose using differential drive kinematics with arc integration
+            theta = self.current_pose.theta
+            new_theta = theta + heading_change
             new_theta = self._normalize_angle(new_theta)
+
+            # Use arc-based position update for turning, straight-line for driving straight
+            if abs(heading_change) > 0.001:  # Threshold to avoid division by zero
+                # Calculate radius of curvature and update using circular arc
+                R = forward_distance / heading_change
+                new_x = self.current_pose.x + R * (np.sin(new_theta) - np.sin(theta))
+                new_y = self.current_pose.y - R * (np.cos(new_theta) - np.cos(theta))
+            else:
+                # Straight-line motion (limit case as heading_change -> 0)
+                cos_theta = np.cos(theta)
+                sin_theta = np.sin(theta)
+                new_x = self.current_pose.x + forward_distance * cos_theta
+                new_y = self.current_pose.y + forward_distance * sin_theta
 
             # Create new pose
             new_pose = Pose(new_x, new_y, new_theta, current_time)
