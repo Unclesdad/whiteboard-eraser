@@ -141,12 +141,21 @@ def main():
             # Drive until 180° turn complete
             print(f"\nDriving semicircle (target: 180°)...")
             loop_count = 0
+            last_heading = start_heading
+            cumulative_turn = 0.0
+
             while True:
                 time.sleep(0.1)  # 10Hz polling
                 loop_count += 1
 
                 # Get current heading
                 _, _, current_heading = gyro.get_orientation()
+
+                # Calculate incremental change from last reading (handles wraparound)
+                incremental_change = normalize_angle_change(last_heading, current_heading)
+                cumulative_turn += incremental_change
+                last_heading = current_heading
+
                 heading_change = normalize_angle_change(start_heading, current_heading)
 
                 # Print progress every second
@@ -156,10 +165,10 @@ def main():
                     current2 = motor2.get_encoder_count()
                     delta1 = current1 - start_count1
                     delta2 = current2 - start_count2
-                    print(f"  {elapsed:.1f}s: Heading={heading_change:+6.1f}° | M1={delta1:5d} M2={delta2:5d}")
+                    print(f"  {elapsed:.1f}s: Heading={heading_change:+6.1f}° | Cumulative={cumulative_turn:+6.1f}° | M1={delta1:5d} M2={delta2:5d}")
 
-                # Check if we've completed 180° turn
-                if abs(heading_change) >= 180.0:
+                # Check if we've completed 180° turn (use cumulative to handle wraparound)
+                if abs(cumulative_turn) >= 180.0:
                     break
 
             # Stop motors
@@ -177,7 +186,8 @@ def main():
 
             print(f"\n✓ Semicircle complete!")
             print(f"  Time: {elapsed_time:.1f} seconds")
-            print(f"  Actual turn: {actual_turn:+.1f}° (target: 180°)")
+            print(f"  Cumulative turn: {cumulative_turn:+.1f}° (target: ±180°)")
+            print(f"  Final heading delta: {actual_turn:+.1f}°")
             print(f"  Motor1 total: {total1:+6d} counts ({abs(total1)/elapsed_time:.1f} cps)")
             print(f"  Motor2 total: {total2:+6d} counts ({abs(total2)/elapsed_time:.1f} cps)")
 
