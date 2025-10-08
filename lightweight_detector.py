@@ -19,7 +19,7 @@ from simple_marking_detector import SimpleMarkingDetector
 CAMERA_WIDTH = 640    # Further reduced for battery operation
 CAMERA_HEIGHT = 480   # Further reduced for battery operation
 PROCESSING_WIDTH = 640   # Keep original processing resolution for better accuracy
-PROCESSING_HEIGHT = 360  # Keep original processing resolution for better accuracy
+PROCESSING_HEIGHT = 480  # Keep original processing resolution for better accuracy
 TARGET_FPS = 5        # Lower FPS to reduce power draw
 SAVE_FRAMES = False   # Set True to save annotated frames periodically
 SAVE_INTERVAL = 30    # Save every N frames if enabled
@@ -123,23 +123,23 @@ def main():
         print("\n📷 Initializing camera...")
         picam2 = Picamera2(camera_num=0)
 
-        # Minimal configuration
-        config = picam2.create_still_configuration(
-            main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT)},
-            buffer_count=2  # Minimal buffering
+        # Video configuration to match simple_camera_stream.py
+        config = picam2.create_video_configuration(
+            main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT)}
         )
         picam2.configure(config)
 
-        # Conservative camera controls to minimize power
+        # Camera controls matching simple_camera_stream.py
         controls = {
-            "AeEnable": False,       # Disable auto-exposure
-            "AwbEnable": False,      # Disable auto white balance (saves power)
-            "ExposureTime": 10000,   # Fixed exposure
-            "AnalogueGain": 2.0,     # Fixed gain
-            "Brightness": 0.6,       # Moderate brightness
+            "AeEnable": False,          # Disable auto-exposure
+            "AwbEnable": True,          # Enable auto white balance for color consistency
+            "ExposureTime": 8000,       # Reduced exposure time to save power
+            "AnalogueGain": 2.5,        # Reduced gain to save power
+            "Brightness": 0.725,        # High brightness (0.0 to 1.0)
+            "Contrast": 2,              # Higher contrast for better marking distinction
         }
         picam2.set_controls(controls)
-        print(f"✓ Camera configured with low-power settings")
+        print(f"✓ Camera configured: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
 
         # Initialize detector
         print("\n🔍 Initializing detector...")
