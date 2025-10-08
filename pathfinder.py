@@ -60,7 +60,7 @@ class CarConfig:
 
         # Steering constraints
         self.max_steering_angle = np.radians(45.0)  # Max steering angle (±45° from center)
-        self.min_turning_radius = self.wheelbase / np.tan(self.max_steering_angle)
+        self.min_turning_radius = 250.0  # mm - empirically measured from circle_test.py (25cm)
 
         # Motion constraints
         self.max_speed = 200.0  # mm/s
