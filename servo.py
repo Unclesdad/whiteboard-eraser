@@ -30,7 +30,10 @@ class ServoController:
         # Standard servo: 50Hz PWM, 1-2ms pulse width for 0-180 degrees
         self.pwm = GPIO.PWM(self.PWM_PIN, 50)  # 50Hz frequency
         self.pwm.start(0)
-        
+
+        # Track current angle
+        self.current_angle = 90
+
         # Set to neutral position (90 degrees)
         self.set_angle(90)
         
@@ -57,33 +60,40 @@ class ServoController:
         """
         # Clamp angle to valid range (±45° from center)
         angle = max(45, min(135, angle))
-        
+
         # Convert angle to duty cycle
         # 0 degrees = 1ms pulse = 2% duty cycle at 50Hz
         # 180 degrees = 2ms pulse = 10% duty cycle at 50Hz
         # Linear interpolation: duty = 2 + (angle/180) * 8
         duty_cycle = 2 + (angle / 180) * 8
-        
+
         self.pwm.ChangeDutyCycle(duty_cycle)
-        
+
+        # Update current angle tracking
+        self.current_angle = angle
+
         # Brief delay to allow servo to move
         time.sleep(0.1)
         
     def set_pulse_width(self, pulse_ms):
         """
         Set servo position using pulse width in milliseconds.
-        
+
         Args:
             pulse_ms: Pulse width from 1.0 to 2.0 ms
         """
         # Clamp pulse width to safe range
         pulse_ms = max(1.0, min(2.0, pulse_ms))
-        
+
         # Convert pulse width to duty cycle at 50Hz
         # duty_cycle = (pulse_ms / 20ms) * 100%
         duty_cycle = (pulse_ms / 20.0) * 100
-        
+
         self.pwm.ChangeDutyCycle(duty_cycle)
+
+        # Update current angle tracking based on pulse width
+        self.current_angle = self.get_angle_from_pulse(pulse_ms)
+
         time.sleep(0.1)
     
     def get_angle_from_pulse(self, pulse_ms):
@@ -122,9 +132,11 @@ class ServoController:
     def cleanup(self):
         """Clean up GPIO resources."""
         try:
-            self.pwm.stop()
+            if hasattr(self, 'pwm') and self.pwm is not None:
+                self.pwm.stop()
             GPIO.cleanup()
-        except:
+        except Exception:
+            # Silently handle cleanup errors to avoid cascading failures
             pass
 
 def test_servo_controller():

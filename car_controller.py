@@ -554,14 +554,32 @@ class CarController:
 
     def stop_all_motors(self):
         """Stop all motors immediately"""
-        self.left_motor.stop()
-        self.right_motor.stop()
+        try:
+            if hasattr(self, 'left_motor') and self.left_motor is not None:
+                self.left_motor.stop()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'right_motor') and self.right_motor is not None:
+                self.right_motor.stop()
+        except Exception:
+            pass
 
     def emergency_stop(self):
         """Emergency stop - stop all motion and set emergency state"""
         self.emergency_stop_flag = True
-        self.stop_all_motors()
-        self.servo.set_angle(90)  # Center steering
+
+        try:
+            self.stop_all_motors()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'servo') and self.servo is not None:
+                self.servo.set_angle(90)  # Center steering
+        except Exception:
+            pass
 
         with self.state_lock:
             self.state = CarState.EMERGENCY_STOP
@@ -595,6 +613,14 @@ class CarController:
         with self.state_lock:
             state = self.state
 
+        # Get steering angle defensively (handle cases where servo might not be fully initialized)
+        steering_angle = 0.0
+        try:
+            if hasattr(self.servo, 'current_angle'):
+                steering_angle = self.servo.current_angle - 90
+        except Exception:
+            pass
+
         return CarStatus(
             state=state,
             position_x=self.position_x,
@@ -604,7 +630,7 @@ class CarController:
             angular_velocity=self.angular_velocity,
             left_motor_speed=self.left_motor.get_speed(),
             right_motor_speed=self.right_motor.get_speed(),
-            steering_angle=self.servo.current_angle - 90,  # Convert back to ±degrees
+            steering_angle=steering_angle,  # Convert back to ±degrees
             timestamp=time.time()
         )
 

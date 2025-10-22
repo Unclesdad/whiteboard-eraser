@@ -348,7 +348,15 @@ class N20Motor:
     
     def stop(self):
         """Stop the motor"""
-        self.set(0)
+        try:
+            # Check if devices are still valid before trying to stop
+            if (hasattr(self, 'pwm_device') and self.pwm_device is not None and
+                hasattr(self, 'dir1_device') and self.dir1_device is not None and
+                hasattr(self, 'dir2_device') and self.dir2_device is not None):
+                self.set(0)
+        except Exception:
+            # Ignore errors during stop - we're likely in cleanup
+            pass
     
     def _print_hardware_info(self):
         """Print Raspberry Pi hardware information for diagnostics"""
@@ -482,18 +490,29 @@ class N20Motor:
         try:
             self.stop()
             time.sleep(0.1)  # Give time for devices to stop
-        except:
+        except Exception:
             pass
 
         # Close gpiozero devices
         try:
-            if self.pwm_device:
+            if hasattr(self, 'pwm_device') and self.pwm_device is not None:
                 self.pwm_device.close()
-            if self.dir1_device:
+                self.pwm_device = None
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'dir1_device') and self.dir1_device is not None:
                 self.dir1_device.close()
-            if self.dir2_device:
+                self.dir1_device = None
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'dir2_device') and self.dir2_device is not None:
                 self.dir2_device.close()
-        except:
+                self.dir2_device = None
+        except Exception:
             pass
 
         # Close encoder devices

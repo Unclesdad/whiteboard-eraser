@@ -785,6 +785,10 @@ class WhiteboardEraserMain:
 
     def shutdown(self):
         """Graceful shutdown of all systems"""
+        # Prevent double-shutdown
+        if hasattr(self, '_shutdown_complete') and self._shutdown_complete:
+            return
+
         print("\n🛑 Shutting down whiteboard eraser...")
 
         self.shutdown_requested = True
@@ -792,24 +796,37 @@ class WhiteboardEraserMain:
 
         # Stop car
         if self.car_controller:
-            self.car_controller.emergency_stop()
-            self.car_controller.cleanup()
+            try:
+                self.car_controller.emergency_stop()
+            except Exception:
+                pass
+
+            try:
+                self.car_controller.cleanup()
+            except Exception:
+                pass
 
         # Stop camera
         if self.camera:
             try:
                 self.camera.stop()
                 self.camera.close()
-            except:
+            except Exception:
                 pass
 
         # Close debug windows
         if self.debug:
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
 
         # Save final map
         if self.global_map:
-            self.global_map.save_map("shutdown_map.json")
+            try:
+                self.global_map.save_map("shutdown_map.json")
+            except Exception:
+                pass
 
         # Wait for threads
         if self.main_thread and self.main_thread.is_alive():
@@ -818,6 +835,7 @@ class WhiteboardEraserMain:
         if self.camera_thread and self.camera_thread.is_alive():
             self.camera_thread.join(timeout=2.0)
 
+        self._shutdown_complete = True
         print("✓ Shutdown complete")
 
     def _load_whiteboard_orientation(self):
