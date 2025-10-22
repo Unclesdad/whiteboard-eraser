@@ -380,17 +380,23 @@ class WhiteboardEraserMain:
             # Reset position
             self.localization.reset_position(0, 0, 0)
 
-            if self.whiteboard_mapped:
-                print("✓ Using previously mapped whiteboard orientation")
-                print("🔍 Starting marking detection scan...")
-                with self.state_lock:
-                    self.state = EraserState.INITIAL_SCAN
-                    self.state_start_time = time.time()
-            else:
-                print("🧭 Starting whiteboard orientation mapping...")
-                with self.state_lock:
-                    self.state = EraserState.WHITEBOARD_MAPPING
-                    self.state_start_time = time.time()
+            # Use default whiteboard orientation (no mapping needed)
+            if not self.whiteboard_mapped:
+                print("📐 Using default whiteboard orientation (no mapping)")
+                self.whiteboard_up_angle = np.radians(90)    # Up is 90°
+                self.whiteboard_down_angle = np.radians(270)  # Down is 270°
+                self.whiteboard_left_angle = np.radians(180)  # Left is 180°
+                self.whiteboard_right_angle = np.radians(0)   # Right is 0°
+                self.whiteboard_mapped = True
+
+                # Update pathfinder with default orientation
+                self.pathfinder.whiteboard_up_direction = self.whiteboard_up_angle
+
+            # Skip mapping and scanning - go straight to waiting for markings
+            print("🔍 Ready to detect markings (robot stationary)...")
+            with self.state_lock:
+                self.state = EraserState.SCANNING
+                self.state_start_time = time.time()
         else:
             remaining = max(0, self.config.startup_delay - elapsed_time)
             if int(elapsed_time) % 2 == 0 and elapsed_time > 0:  # Print every 2 seconds
