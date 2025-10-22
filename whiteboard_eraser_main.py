@@ -325,6 +325,7 @@ class WhiteboardEraserMain:
 
     def _camera_processing_loop(self):
         """Camera processing loop for continuous marking detection"""
+        detection_count = 0
         while self.running and self.camera:
             try:
                 current_time = time.time()
@@ -343,6 +344,11 @@ class WhiteboardEraserMain:
 
                 # Detect markings in car coordinates
                 car_markings = self.marking_detector.detect_and_convert_to_car_coordinates(image)
+
+                # Debug: print detection status occasionally
+                detection_count += 1
+                if detection_count % 10 == 0:  # Every 10 frames
+                    print(f"🎥 Camera frame {detection_count}: {len(car_markings)} markings detected")
 
                 if car_markings:
                     # Update localization with calibrated encoder readings
