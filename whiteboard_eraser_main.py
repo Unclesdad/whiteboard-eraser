@@ -117,6 +117,7 @@ class WhiteboardEraserMain:
         self.current_path: Optional[Path] = None
         self.current_target: Optional[Tuple[float, float]] = None
         self.navigation_start_time = 0.0
+        self.expected_nav_time = 0.0  # Fallback for time-based navigation when encoders don't work
 
         # Statistics
         self.total_markings_detected = 0
@@ -645,6 +646,11 @@ class WhiteboardEraserMain:
 
             # Start navigation
             self.navigation_start_time = time.time()
+
+            # Calculate expected travel time for fallback (if encoders don't work)
+            distance = np.sqrt(target_x**2 + target_y**2)
+            self.expected_nav_time = distance / 100.0  # Assume 100mm/s average speed
+
             self.car_controller.set_target_position(target_x, target_y)
 
             with self.state_lock:
@@ -660,6 +666,11 @@ class WhiteboardEraserMain:
             if simple_path:
                 self.current_path = simple_path
                 self.navigation_start_time = time.time()
+
+                # Calculate expected travel time for fallback
+                distance = np.sqrt(target_x**2 + target_y**2)
+                self.expected_nav_time = distance / 100.0  # Assume 100mm/s average speed
+
                 self.car_controller.set_target_position(target_x, target_y)
 
                 with self.state_lock:
@@ -682,6 +693,10 @@ class WhiteboardEraserMain:
         pose = self.localization.get_pose()
         target_x, target_y = self.current_target
 
+        # Debug: Check encoder counts
+        left_revs = self.car_controller.left_motor.get_revolutions()
+        right_revs = self.car_controller.right_motor.get_revolutions()
+
         # Check if we've reached the target
         distance_to_target = np.sqrt((target_x - pose.x)**2 + (target_y - pose.y)**2)
 
@@ -691,8 +706,27 @@ class WhiteboardEraserMain:
                 self.state = EraserState.ERASING
             return
 
+        # Debug output every few cycles
+        if int(time.time() * 2) % 2 == 0:  # Every ~0.5s
+            print(f"Nav: pos=({pose.x:.1f},{pose.y:.1f}) target=({target_x:.1f},{target_y:.1f}) "
+                  f"dist={distance_to_target:.1f}mm encoders=L{left_revs:.2f},R{right_revs:.2f}")
+
         # Check for navigation timeout
         elapsed_time = time.time() - self.navigation_start_time
+
+        # Fallback: If encoders aren't working and position stuck at (0,0),
+        # use time-based navigation instead
+        if abs(pose.x) < 1.0 and abs(pose.y) < 1.0 and elapsed_time > 2.0:
+            # Position hasn't updated from (0,0) - encoders likely not working
+            if elapsed_time > self.expected_nav_time * 1.2:  # Add 20% margin
+                print(f"⚠️ Odometry not updating (stuck at origin), using time-based navigation")
+                print(f"Traveled for {elapsed_time:.1f}s (expected {self.expected_nav_time:.1f}s), assuming target reached")
+                self.car_controller.stop_all_motors()
+                time.sleep(0.5)  # Let motors stop
+                with self.state_lock:
+                    self.state = EraserState.ERASING
+                return
+
         if elapsed_time > self.config.max_navigation_time:
             print(f"Navigation timeout after {elapsed_time:.1f}s")
             self.car_controller.stop_all_motors()
