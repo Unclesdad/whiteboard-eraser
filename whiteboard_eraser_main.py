@@ -416,8 +416,11 @@ class WhiteboardEraserMain:
 
         elif elapsed_time < self.config.whiteboard_mapping_time:
             # Drive in a circle to map orientations
-            linear_speed = 0.4  # Medium forward speed
-            angular_speed = 0.3  # Gentle turn to make a circle
+            # Maximum power for reliable movement
+            # left_motor = 1.0 - 0.2*0.5 = 0.9 (90%)
+            # right_motor = 1.0 + 0.2*0.5 = 1.0 (100%)
+            linear_speed = 1.0  # Maximum forward speed
+            angular_speed = 0.2  # Turn to make a circle
 
             self.car_controller.set_manual_control(linear_speed, angular_speed)
 
@@ -459,7 +462,11 @@ class WhiteboardEraserMain:
                 # Print progress occasionally
                 if int(elapsed_time) % 3 == 0 and elapsed_time > 3:
                     remaining_time = self.config.whiteboard_mapping_time - elapsed_time
+                    # Show encoder feedback for debugging
+                    left_revs = self.car_controller.left_motor.get_revolutions()
+                    right_revs = self.car_controller.right_motor.get_revolutions()
                     print(f"🧭 Mapping... {len(self.mapping_angles)}/4 directions, {remaining_time:.1f}s remaining")
+                    print(f"   Motors: L={left_revs:.2f} revs, R={right_revs:.2f} revs, heading={current_heading:.1f}°")
 
             except Exception as e:
                 print(f"⚠️ Error reading gyro during mapping: {e}")
@@ -519,9 +526,11 @@ class WhiteboardEraserMain:
 
         if elapsed_time < self.config.circle_scan_time:
             # Drive in a circle to scan for markings
-            # Use constant forward speed with turning
-            linear_speed = 0.4  # Medium forward speed
-            angular_speed = 0.3  # Gentle turn to make a circle
+            # Maximum power for reliable movement
+            # left_motor = 1.0 - 0.2*0.5 = 0.9 (90%)
+            # right_motor = 1.0 + 0.2*0.5 = 1.0 (100%)
+            linear_speed = 1.0  # Maximum forward speed
+            angular_speed = 0.2  # Turn to make a circle
 
             self.car_controller.set_manual_control(linear_speed, angular_speed)
 

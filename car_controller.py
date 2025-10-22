@@ -238,6 +238,10 @@ class CarController:
         self.linear_velocity = 0.0
         self.angular_velocity = 0.0
 
+        # Odometry tracking (for delta calculations)
+        self.prev_left_revs = 0.0
+        self.prev_right_revs = 0.0
+
         # Control thread
         self.control_thread = None
         self.running = False
@@ -449,14 +453,21 @@ class CarController:
         if dt <= 0:
             return
 
-        # Get encoder readings
+        # Get encoder readings (cumulative revolutions)
         left_revs = self.left_motor.get_revolutions()
         right_revs = self.right_motor.get_revolutions()
 
-        # Calculate distances (this is incremental since last reset)
-        # For proper odometry, we'd need to track previous values
-        left_distance = left_revs * 2 * np.pi * self.wheel_radius_mm
-        right_distance = right_revs * 2 * np.pi * self.wheel_radius_mm
+        # Calculate DELTA revolutions since last update
+        delta_left_revs = left_revs - self.prev_left_revs
+        delta_right_revs = right_revs - self.prev_right_revs
+
+        # Store for next iteration
+        self.prev_left_revs = left_revs
+        self.prev_right_revs = right_revs
+
+        # Calculate incremental distances traveled this update
+        left_distance = delta_left_revs * 2 * np.pi * self.wheel_radius_mm
+        right_distance = delta_right_revs * 2 * np.pi * self.wheel_radius_mm
 
         # For now, use gyro for heading
         try:
@@ -465,11 +476,11 @@ class CarController:
         except:
             pass  # Keep previous heading if gyro fails
 
-        # Simple velocity estimation
+        # Velocity estimation from incremental distance
         forward_distance = (left_distance + right_distance) / 2.0
         self.linear_velocity = forward_distance / dt if dt > 0 else 0
 
-        # Update position (simplified - in real implementation would use proper odometry)
+        # Update position using incremental distance
         self.position_x += forward_distance * np.cos(self.heading)
         self.position_y += forward_distance * np.sin(self.heading)
 
