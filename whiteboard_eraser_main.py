@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 # Import our custom modules
-from marking_detector import MarkingDetector
+from simple_marking_detector import SimpleMarkingDetector
 from localization import LocalizationSystem
 from mapping import GlobalMap
 from pathfinder import AckermannPathfinder, ObstacleMap, Path, CarConfig
@@ -97,7 +97,7 @@ class WhiteboardEraserMain:
         self.shutdown_requested = False
 
         # Initialize subsystems
-        self.marking_detector: Optional[MarkingDetector] = None
+        self.marking_detector: Optional[SimpleMarkingDetector] = None
         self.localization: Optional[LocalizationSystem] = None
         self.global_map: Optional[GlobalMap] = None
         self.pathfinder: Optional[AckermannPathfinder] = None
@@ -164,12 +164,17 @@ class WhiteboardEraserMain:
             print("Initializing subsystems...")
 
             # Initialize marking detector
-            self.marking_detector = MarkingDetector(
+            # Use SimpleMarkingDetector with correct camera parameters
+            # Camera is at 7.5cm (75mm) height, 20.5° down angle
+            self.marking_detector = SimpleMarkingDetector(
+                camera_height_mm=75.0,  # 7.5cm above whiteboard
+                camera_angle_deg=20.5,  # Camera tilt angle
                 image_width=self.config.camera_width,
                 image_height=self.config.camera_height,
                 debug=self.debug
             )
-            print("✓ Marking detector initialized")
+            print("✓ Marking detector initialized (SimpleMarkingDetector)")
+            print(f"  Camera: {self.config.camera_width}x{self.config.camera_height}, 75.0mm height, 20.5° angle")
 
             # Initialize localization
             self.localization = LocalizationSystem()
@@ -205,8 +210,21 @@ class WhiteboardEraserMain:
                     main={"size": (self.config.camera_width, self.config.camera_height)}
                 )
                 self.camera.configure(camera_config)
+
+                # Set manual camera controls for consistent detection
+                # (matches simple_camera_stream.py settings)
+                controls = {
+                    "AeEnable": False,          # Disable auto-exposure
+                    "AwbEnable": True,          # Enable auto white balance
+                    "ExposureTime": 8000,       # Fixed exposure time
+                    "AnalogueGain": 2.5,        # Fixed gain
+                    "Brightness": 0.725,        # High brightness for whiteboard
+                    "Contrast": 2,              # Higher contrast for marking distinction
+                }
+                self.camera.set_controls(controls)
                 self.camera.start()
-                print("✓ Camera initialized")
+                print("✓ Camera initialized with manual controls")
+                print(f"  Controls: ExposureTime={controls['ExposureTime']}, Gain={controls['AnalogueGain']}, Brightness={controls['Brightness']}")
             else:
                 print("⚠ Camera not available - using simulation mode")
 
