@@ -84,33 +84,34 @@ class CarConfig:
         self.angle_resolution = np.radians(15.0)  # radians
 
 class ObstacleMap:
-    """Simple obstacle map for path planning"""
+    """Workspace bounds for path planning (no obstacles on whiteboard, just workspace limits)"""
     def __init__(self, width_mm: float = 2000.0, height_mm: float = 1500.0):
         self.width_mm = width_mm
         self.height_mm = height_mm
-        self.obstacles: List[Tuple[float, float, float]] = []  # (x, y, radius)
+        # No obstacles on a whiteboard - this is just for tracking workspace bounds
+        self.obstacles: List[Tuple[float, float, float]] = []
 
     def add_obstacle(self, x: float, y: float, radius: float):
-        """Add circular obstacle"""
+        """Add circular obstacle (unused for whiteboard - no obstacles)"""
         self.obstacles.append((x, y, radius))
 
     def is_point_free(self, x: float, y: float, clearance: float = 0.0) -> bool:
-        """Check if point is free of obstacles"""
-        # Check bounds
-        if (x < clearance or x > self.width_mm - clearance or
-            y < clearance or y > self.height_mm - clearance):
-            return False
+        """Check if point is within reasonable workspace bounds (no obstacles on whiteboard)"""
+        # Just check if position is within reasonable distance from start
+        # Centered coordinate system: robot starts at (0,0)
+        half_width = self.width_mm / 2
+        half_height = self.height_mm / 2
 
-        # Check obstacles
-        for ox, oy, radius in self.obstacles:
-            if np.sqrt((x - ox)**2 + (y - oy)**2) < radius + clearance:
-                return False
+        # Only fail if position is extremely far from starting point
+        if (x < -half_width or x > half_width or
+            y < -half_height or y > half_height):
+            return False
 
         return True
 
     def is_path_free(self, x1: float, y1: float, x2: float, y2: float,
                      clearance: float = 0.0, num_checks: int = 10) -> bool:
-        """Check if straight line path is free"""
+        """Check if straight line path is within workspace bounds"""
         for i in range(num_checks + 1):
             t = i / num_checks
             x = x1 + t * (x2 - x1)
@@ -174,13 +175,13 @@ class AckermannPathfinder:
         """
         start_time = time.time()
 
-        # Validate start and goal
-        if not self.obstacle_map.is_point_free(start_x, start_y, self.config.obstacle_clearance):
-            print("Start position is not free")
+        # Validate start and goal are within workspace bounds
+        if not self.obstacle_map.is_point_free(start_x, start_y):
+            print(f"Start position ({start_x:.1f}, {start_y:.1f}) is outside workspace")
             return None
 
-        if not self.obstacle_map.is_point_free(goal_x, goal_y, self.config.obstacle_clearance):
-            print("Goal position is not free")
+        if not self.obstacle_map.is_point_free(goal_x, goal_y):
+            print(f"Goal position ({goal_x:.1f}, {goal_y:.1f}) is outside workspace")
             return None
 
         # Initialize A* search
@@ -217,9 +218,8 @@ class AckermannPathfinder:
                 if successor_key in closed_set:
                     continue
 
-                # Check if position is free
-                if not self.obstacle_map.is_point_free(successor.x, successor.y,
-                                                     self.config.obstacle_clearance):
+                # Check if position is within workspace
+                if not self.obstacle_map.is_point_free(successor.x, successor.y):
                     continue
 
                 # Check if we've seen this node before
@@ -259,9 +259,8 @@ class AckermannPathfinder:
         Returns:
             Simple path or None if blocked
         """
-        # Check if direct path is free
-        if self.obstacle_map.is_path_free(start_x, start_y, goal_x, goal_y,
-                                        self.config.obstacle_clearance):
+        # Check if direct path is within bounds (no obstacles on whiteboard)
+        if self.obstacle_map.is_path_free(start_x, start_y, goal_x, goal_y):
             # Create simple path
             waypoints = []
 
@@ -321,12 +320,10 @@ class AckermannPathfinder:
                 new_x = (prev_wp.x + 2*curr_wp.x + next_wp.x) / 4
                 new_y = (prev_wp.y + 2*curr_wp.y + next_wp.y) / 4
 
-                # Check if smoothed position is valid
-                if (self.obstacle_map.is_point_free(new_x, new_y, self.config.obstacle_clearance) and
-                    self.obstacle_map.is_path_free(prev_wp.x, prev_wp.y, new_x, new_y,
-                                                 self.config.obstacle_clearance) and
-                    self.obstacle_map.is_path_free(new_x, new_y, next_wp.x, next_wp.y,
-                                                 self.config.obstacle_clearance)):
+                # Check if smoothed position is within bounds
+                if (self.obstacle_map.is_point_free(new_x, new_y) and
+                    self.obstacle_map.is_path_free(prev_wp.x, prev_wp.y, new_x, new_y) and
+                    self.obstacle_map.is_path_free(new_x, new_y, next_wp.x, next_wp.y)):
 
                     # Apply smoothing
                     smoothed_waypoints[i].x = new_x

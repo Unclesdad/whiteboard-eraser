@@ -190,11 +190,13 @@ class WhiteboardEraserMain:
             print("✓ Global map initialized")
 
             # Initialize pathfinder
-            obstacle_map = ObstacleMap(width_mm=2000, height_mm=1500)  # Adjust to your whiteboard size
+            # Robot starts at (0,0) and uses relative coordinates
+            # Workspace size is just to prevent going unreasonably far
+            workspace = ObstacleMap(width_mm=4000, height_mm=3000)  # ±2000mm x, ±1500mm y from start
             car_config = CarConfig()
             # Will set whiteboard orientation after mapping is complete
-            self.pathfinder = AckermannPathfinder(car_config, obstacle_map)
-            print("✓ Pathfinder initialized")
+            self.pathfinder = AckermannPathfinder(car_config, workspace)
+            print("✓ Pathfinder initialized (relative coordinates from start)")
 
             # Initialize car controller
             self.car_controller = CarController(
