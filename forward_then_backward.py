@@ -129,14 +129,14 @@ def main():
         print("Starting simple forward/backward test...")
         print("=" * 60)
         
-        # Test 1: Both motors forward at 80% power
-        set_both_motors(0.8, 0.8, 3.0, "Forward Motion - Both motors at 80% power (3 seconds)")
-        
+        # Test 1: Both motors forward at 100% power
+        set_both_motors(1.0, 1.0, 3.0, "Forward Motion - Both motors at 100% power (3 seconds)")
+
         # Pause between tests
         time.sleep(2)
-        
-        # Test 2: Both motors backward at 80% power  
-        set_both_motors(-0.8, -0.8, 3.0, "Backward Motion - Both motors at 80% power (3 seconds)")
+
+        # Test 2: Both motors backward at 100% power
+        set_both_motors(-1.0, -1.0, 3.0, "Backward Motion - Both motors at 100% power (3 seconds)")
         
         print("\n" + "=" * 60)
         print("Test sequence complete!")
