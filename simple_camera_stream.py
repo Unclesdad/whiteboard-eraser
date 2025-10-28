@@ -173,14 +173,14 @@ class SimpleDetectionOutput(io.BufferedIOBase):
         self.merge_distance_mm = 30.0  # Merge markings within 30mm
         self.forget_threshold = 10  # Forget after 10 absent frames
 
-        print("✓ Simple detection system initialized")
+        print("Simple detection system initialized")
 
     def start_detection(self):
-        """Start the detection processing thread"""
+        """start the detection processing thread"""
         self.detection_running = True
         self.detection_thread = threading.Thread(target=self._detection_loop, daemon=True)
         self.detection_thread.start()
-        print("✓ Simple detection thread started")
+        print("Simple detection thread started")
 
     def stop_detection(self):
         """Stop the detection processing"""
@@ -649,36 +649,36 @@ class SimpleStreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
 def main():
     global output, picam2
 
-    print("🔧 Starting Simple Whiteboard Detection Test...")
+    print("Starting Simple Whiteboard Detection Test")
 
     try:
         # Initialize camera
-        print("📷 Starting camera...")
+        print("Starting camera...")
         picam2 = Picamera2(camera_num=0)
 
         # Create configuration with manual controls
         config = picam2.create_video_configuration(main={"size": (CAMERA_WIDTH, CAMERA_HEIGHT)})
         picam2.configure(config)
-        print(f"✓ Camera configured for {CAMERA_WIDTH}x{CAMERA_HEIGHT} resolution")
+        print(f"Camera configured for {CAMERA_WIDTH}x{CAMERA_HEIGHT} resolution")
 
         # Set manual camera controls for consistent brightness
         controls = {
             "AeEnable": False,          # Disable auto-exposure
             "AwbEnable": True,          # Enable auto white balance for color consistency
-            "ExposureTime": 8000,       # Reduced exposure time to save power 
+            "ExposureTime": 8000,       # Reduced exposure time to save power
             "AnalogueGain": 2.5,        # Reduced gain to save power
             "Brightness": 0.725,          # High brightness (0.0 to 1.0)
             "Contrast": 2,              # Higher contrast for better marking distinction
         }
         picam2.set_controls(controls)
-        print(f"✓ Camera controls set: {controls}")
+        print(f"Camera controls set: {controls}")
 
         # Initialize simple detection output
         output = SimpleDetectionOutput()
 
         # Start camera recording
         picam2.start_recording(MJPEGEncoder(), FileOutput(output))
-        print("✓ Camera recording started")
+        print("Camera recording started")
 
         # Start detection processing
         output.start_detection()
@@ -687,24 +687,23 @@ def main():
         address = ('', 8000)
         server = SimpleStreamingServer(address, SimpleStreamingHandler)
 
-        print("🌐 Simple detection server starting...")
-        print(f"📺 Open your browser: http://localhost:8000")
-        print("🎯 Should show yellow line for whiteboard edge + detected markings")
-        print("⚡ Press Ctrl+C to stop")
+        print("Simple detection server starting")
+        print(f"Open browser: http://localhost:8000")
+        print("Press Ctrl+C to stop")
         print()
 
         server.serve_forever()
 
     except KeyboardInterrupt:
-        print("\n🛑 Shutting down...")
+        print("\nShutting down...")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
     finally:
         if 'output' in globals():
             output.stop_detection()
         if 'picam2' in globals():
             picam2.stop_recording()
-        print("✓ Cleanup complete")
+        print("Cleanup complete")
 
 if __name__ == "__main__":
     main()

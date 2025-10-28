@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Localization System for Whiteboard Eraser Car
-Combines motor encoder data with gyroscope readings for accurate position tracking
-"""
-
 import numpy as np
 import time
 import threading
@@ -13,74 +8,49 @@ from collections import deque
 
 @dataclass
 class Pose:
-    """Represents car position and orientation"""
-    x: float  # mm from start position
-    y: float  # mm from start position
-    theta: float  # radians (0 = facing positive X)
+    x: float
+    y: float
+    theta: float
     timestamp: float
     confidence: float = 1.0
 
 @dataclass
 class Velocity:
-    """Represents car velocity"""
-    linear: float  # mm/s
-    angular: float  # rad/s
+    linear: float
+    angular: float
     timestamp: float
 
 class LocalizationSystem:
-    """
-    Combines wheel encoder odometry with gyroscope for accurate localization
-    """
 
     def __init__(self,
-                 wheel_base_mm: float = 110.0,  # Distance between front and back wheels
-                 wheel_radius_mm: float = 30.0,  # Wheel radius
-                 ticks_per_revolution: int = 4445,  # Encoder ticks per wheel revolution (calibrated)
-                 track_width_mm: float = 110.0,  # Distance between left and right wheels
-                 gyro_weight: float = 0.7,  # How much to trust gyro vs encoder for heading
+                 wheel_base_mm: float = 110.0,
+                 wheel_radius_mm: float = 30.0,
+                 ticks_per_revolution: int = 4445,
+                 track_width_mm: float = 110.0,
+                 gyro_weight: float = 0.7,
                  max_position_history: int = 100):
-        """
-        Initialize localization system
-
-        Args:
-            wheel_base_mm: Distance between front and back axles
-            wheel_radius_mm: Radius of drive wheels
-            ticks_per_revolution: Encoder ticks per wheel revolution
-            track_width_mm: Distance between left and right wheels
-            gyro_weight: Weight for gyro vs encoder heading fusion (0.0-1.0)
-            max_position_history: Maximum number of poses to keep in history
-        """
         self.wheel_base_mm = wheel_base_mm
         self.wheel_radius_mm = wheel_radius_mm
         self.ticks_per_revolution = ticks_per_revolution
         self.track_width_mm = track_width_mm
         self.gyro_weight = gyro_weight
 
-        # Calculate distance per encoder tick
         wheel_circumference = 2 * np.pi * wheel_radius_mm
         self.mm_per_tick = wheel_circumference / ticks_per_revolution
 
-        # Current pose
         self.current_pose = Pose(0.0, 0.0, 0.0, time.time())
         self.pose_lock = threading.Lock()
-
-        # Position history for smoothing and validation
         self.pose_history = deque(maxlen=max_position_history)
 
-        # Previous encoder readings
         self.prev_left_ticks = 0
         self.prev_right_ticks = 0
         self.prev_time = time.time()
 
-        # Velocity tracking
         self.current_velocity = Velocity(0.0, 0.0, time.time())
         self.velocity_history = deque(maxlen=10)
 
-        # Gyro integration
-        self.gyro_heading_offset = 0.0  # Offset to align gyro with encoder heading
+        self.gyro_heading_offset = 0.0
         self.gyro_initialized = False
-
-        # Error tracking for diagnostics
         self.odometry_errors = deque(maxlen=50)
 
         print(f"LocalizationSystem initialized:")
@@ -89,81 +59,61 @@ class LocalizationSystem:
         print(f"  Geometry: wheelbase={wheel_base_mm}mm, track={track_width_mm}mm")
 
     def reset_position(self, x: float = 0.0, y: float = 0.0, theta: float = 0.0):
-        """Reset current position and orientation"""
+        """reset position and orientation"""
         with self.pose_lock:
             self.current_pose = Pose(x, y, theta, time.time())
             self.pose_history.clear()
             self.pose_history.append(self.current_pose)
 
-        # Reset encoder reference
         self.prev_time = time.time()
         print(f"Position reset to ({x:.1f}, {y:.1f}, {np.degrees(theta):.1f}°)")
 
     def update_with_encoders(self, left_ticks: int, right_ticks: int) -> Pose:
-        """
-        Update position using encoder readings
-
-        Args:
-            left_ticks: Current left motor encoder count
-            right_ticks: Current right motor encoder count
-
-        Returns:
-            Updated pose
-        """
+        """update position from encoder ticks"""
         current_time = time.time()
         dt = current_time - self.prev_time
 
         if dt <= 0:
             return self.current_pose
 
-        # Calculate tick differences
         left_delta = left_ticks - self.prev_left_ticks
         right_delta = right_ticks - self.prev_right_ticks
 
-        # Invert right encoder (motor2 encoder is inverted in hardware)
+        # motor2 encoder is inverted
         right_delta = -right_delta
 
-        # Convert to distances
         left_distance = left_delta * self.mm_per_tick
         right_distance = right_delta * self.mm_per_tick
 
-        # Calculate motion
         forward_distance = (left_distance + right_distance) / 2.0
         heading_change = (right_distance - left_distance) / self.track_width_mm
 
-        # Calculate velocities
         linear_velocity = forward_distance / dt
         angular_velocity = heading_change / dt
 
         with self.pose_lock:
-            # Update pose using differential drive kinematics with arc integration
             theta = self.current_pose.theta
             new_theta = theta + heading_change
             new_theta = self._normalize_angle(new_theta)
 
-            # Use arc-based position update for turning, straight-line for driving straight
-            if abs(heading_change) > 0.001:  # Threshold to avoid division by zero
-                # Calculate radius of curvature and update using circular arc
+            # arc integration for turns, straight-line for driving straight
+            if abs(heading_change) > 0.001:
                 R = forward_distance / heading_change
                 new_x = self.current_pose.x + R * (np.sin(new_theta) - np.sin(theta))
                 new_y = self.current_pose.y - R * (np.cos(new_theta) - np.cos(theta))
             else:
-                # Straight-line motion (limit case as heading_change -> 0)
                 cos_theta = np.cos(theta)
                 sin_theta = np.sin(theta)
                 new_x = self.current_pose.x + forward_distance * cos_theta
                 new_y = self.current_pose.y + forward_distance * sin_theta
 
-            # Create new pose
             new_pose = Pose(new_x, new_y, new_theta, current_time)
             self.current_pose = new_pose
             self.pose_history.append(new_pose)
 
-        # Update velocity
         self.current_velocity = Velocity(linear_velocity, angular_velocity, current_time)
         self.velocity_history.append(self.current_velocity)
 
-        # Update references
         self.prev_left_ticks = left_ticks
         self.prev_right_ticks = right_ticks
         self.prev_time = current_time
@@ -171,42 +121,28 @@ class LocalizationSystem:
         return new_pose
 
     def update_with_gyro(self, gyro_heading_rad: float) -> Pose:
-        """
-        Fuse gyroscope data with encoder-based heading
-
-        Args:
-            gyro_heading_rad: Current heading from gyroscope (radians)
-
-        Returns:
-            Updated pose with fused heading
-        """
+        """fuse gyro data with encoder heading"""
         if not self.gyro_initialized:
-            # Initialize gyro offset to align with current encoder heading
             self.gyro_heading_offset = self.current_pose.theta - gyro_heading_rad
             self.gyro_initialized = True
             return self.current_pose
 
-        # Apply offset to gyro reading
         corrected_gyro_heading = gyro_heading_rad + self.gyro_heading_offset
         corrected_gyro_heading = self._normalize_angle(corrected_gyro_heading)
 
         with self.pose_lock:
-            # Fuse encoder and gyro headings
             encoder_heading = self.current_pose.theta
 
-            # Use complementary filter for sensor fusion
             fused_heading = (self.gyro_weight * corrected_gyro_heading +
                            (1 - self.gyro_weight) * encoder_heading)
             fused_heading = self._normalize_angle(fused_heading)
 
-            # Update pose with fused heading
             self.current_pose.theta = fused_heading
             self.current_pose.timestamp = time.time()
 
         return self.current_pose
 
     def get_pose(self) -> Pose:
-        """Get current pose (thread-safe)"""
         with self.pose_lock:
             return Pose(
                 self.current_pose.x,
@@ -217,7 +153,6 @@ class LocalizationSystem:
             )
 
     def get_velocity(self) -> Velocity:
-        """Get current velocity"""
         return Velocity(
             self.current_velocity.linear,
             self.current_velocity.angular,

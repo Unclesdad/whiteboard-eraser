@@ -204,14 +204,14 @@ class CarController:
             GPIO.setmode(GPIO.BCM)
             GPIO.setwarnings(False)
             self.hardware_available = True
-            print("✓ GPIO initialized successfully")
+            print("GPIO initialized successfully")
         except Exception as e:
-            print(f"❌ CRITICAL: GPIO initialization failed: {e}")
-            print("🔧 Solutions:")
-            print("   - Run with: sudo python3 whiteboard_eraser_main.py")
-            print("   - Check if another process is using GPIO")
-            print("   - Verify you're running on a Raspberry Pi")
-            print("\n🛑 Cannot control hardware without GPIO access - stopping program")
+            print(f"CRITICAL: GPIO initialization failed: {e}")
+            print("Solutions:")
+            print("  - Run with: sudo python3 whiteboard_eraser_main.py")
+            print("  - Check if another process is using GPIO")
+            print("  - Verify you're running on a Raspberry Pi")
+            print("\nCannot control hardware without GPIO access - stopping program")
             raise RuntimeError("GPIO initialization failed - robot cannot access hardware")
 
         # Initialize hardware (will fall back to mock if GPIO failed)
@@ -280,11 +280,11 @@ class CarController:
             print("Motors initialized successfully")
 
         except Exception as e:
-            print(f"❌ CRITICAL: Motor initialization failed: {e}")
+            print(f"CRITICAL: Motor initialization failed: {e}")
 
             # Check if this is the specific SOC error that needs detailed diagnosis
             if "soc peripheral base address" in str(e).lower():
-                print("\n🔍 Running detailed hardware diagnostics...")
+                print("\nRunning detailed hardware diagnostics...")
 
                 # Try to create a temporary motor instance to get the detailed diagnostics
                 try:
@@ -302,46 +302,46 @@ class CarController:
 
             else:
                 # For other errors, show the generic troubleshooting
-                print("🔧 This could be due to:")
-                print("   - Need to run with 'sudo python3 whiteboard_eraser_main.py'")
-                print("   - Motor drivers not connected to GPIO pins")
-                print("   - Incorrect wiring (check left_motor_pins and right_motor_pins)")
-                print("   - Hardware failure in motor drivers or Pi GPIO")
-                print("   - Wrong GPIO pin numbers in configuration")
+                print("This could be due to:")
+                print("  - Need to run with 'sudo python3 whiteboard_eraser_main.py'")
+                print("  - Motor drivers not connected to GPIO pins")
+                print("  - Incorrect wiring (check left_motor_pins and right_motor_pins)")
+                print("  - Hardware failure in motor drivers or Pi GPIO")
+                print("  - Wrong GPIO pin numbers in configuration")
 
-            print("\n🛑 Cannot operate robot without motors - stopping program")
+            print("\nCannot operate robot without motors - stopping program")
             raise RuntimeError("Motor hardware initialization failed - robot cannot function")
 
     def _init_servo(self, servo_pin: int):
-        """Initialize steering servo"""
+        """initialize steering servo"""
         try:
             self.servo = ServoController(servo_pin)
             self.servo.set_angle(90)  # Center position
             print("Servo initialized successfully")
         except Exception as e:
-            print(f"❌ CRITICAL: Servo initialization failed: {e}")
-            print("🔧 This could be due to:")
-            print(f"   - Servo not connected to GPIO pin {servo_pin}")
-            print("   - Incorrect servo wiring (check power, ground, signal)")
-            print("   - GPIO pin conflict or hardware failure")
-            print("\n🛑 Cannot steer robot without servo - stopping program")
+            print(f"CRITICAL: Servo initialization failed: {e}")
+            print("This could be due to:")
+            print(f"  - Servo not connected to GPIO pin {servo_pin}")
+            print("  - Incorrect servo wiring (check power, ground, signal)")
+            print("  - GPIO pin conflict or hardware failure")
+            print("\nCannot steer robot without servo - stopping program")
             raise RuntimeError("Servo hardware initialization failed - robot cannot steer")
 
     def _init_gyro(self, sda_pin: int, scl_pin: int):
-        """Initialize gyroscope"""
+        """initialize gyroscope"""
         try:
             self.gyro = RCCarGyro(sda_pin=sda_pin, scl_pin=scl_pin)
             self.gyro.calibrate(samples=500, show_progress=False)
             self.gyro.start_continuous_update(update_rate=50)
             print("Gyroscope initialized and calibrated")
         except Exception as e:
-            print(f"⚠️  WARNING: Gyroscope initialization failed: {e}")
-            print("🔧 This could be due to:")
-            print(f"   - IMU not connected to I2C pins (SDA={sda_pin}, SCL={scl_pin})")
-            print("   - I2C not enabled (run 'sudo raspi-config' -> Interface Options -> I2C)")
-            print("   - Incorrect IMU wiring or hardware failure")
-            print("   - Wrong I2C address or conflicting I2C devices")
-            print("\n⚠️  Robot will operate with reduced accuracy (dead reckoning only)")
+            print(f"WARNING: Gyroscope initialization failed: {e}")
+            print("This could be due to:")
+            print(f"  - IMU not connected to I2C pins (SDA={sda_pin}, SCL={scl_pin})")
+            print("  - I2C not enabled (run 'sudo raspi-config' -> Interface Options -> I2C)")
+            print("  - Incorrect IMU wiring or hardware failure")
+            print("  - Wrong I2C address or conflicting I2C devices")
+            print("\nRobot will operate with reduced accuracy (dead reckoning only)")
 
             class MockGyro:
                 def __init__(self):

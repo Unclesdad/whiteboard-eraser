@@ -174,21 +174,21 @@ class WhiteboardEraserMain:
                 image_height=self.config.camera_height,
                 debug=self.debug
             )
-            print("✓ Marking detector initialized (SimpleMarkingDetector)")
+            print("Marking detector initialized (SimpleMarkingDetector)")
             print(f"  Camera: {self.config.camera_width}x{self.config.camera_height}, 75.0mm height, 20.5° angle")
 
             # Initialize localization
             self.localization = LocalizationSystem()
             # Try to load previous whiteboard orientation
             self._load_whiteboard_orientation()
-            print("✓ Localization system initialized")
+            print("Localization system initialized")
 
             # Initialize global map
             self.global_map = GlobalMap(
                 min_confidence=self.config.min_marking_confidence,
                 erase_confirmation_distance=self.config.erase_radius_mm
             )
-            print("✓ Global map initialized")
+            print("Global map initialized")
 
             # Initialize pathfinder
             # Robot starts at (0,0) and uses relative coordinates
@@ -197,14 +197,14 @@ class WhiteboardEraserMain:
             car_config = CarConfig()
             # Will set whiteboard orientation after mapping is complete
             self.pathfinder = AckermannPathfinder(car_config, workspace)
-            print("✓ Pathfinder initialized (relative coordinates from start)")
+            print("Pathfinder initialized (relative coordinates from start)")
 
             # Initialize car controller
             self.car_controller = CarController(
                 max_speed_mm_s=self.config.max_speed_mm_s,
                 update_rate_hz=50.0
             )
-            print("✓ Car controller initialized")
+            print("Car controller initialized")
 
             # Initialize camera
             if CAMERA_AVAILABLE:
@@ -226,10 +226,10 @@ class WhiteboardEraserMain:
                 }
                 self.camera.set_controls(controls)
                 self.camera.start()
-                print("✓ Camera initialized with manual controls")
+                print("Camera initialized with manual controls")
                 print(f"  Controls: ExposureTime={controls['ExposureTime']}, Gain={controls['AnalogueGain']}, Brightness={controls['Brightness']}")
             else:
-                print("⚠ Camera not available - using simulation mode")
+                print("Camera not available - using simulation mode")
 
             # Start subsystem threads
             self.car_controller.start_control_loop()
@@ -238,11 +238,11 @@ class WhiteboardEraserMain:
                 self.state = EraserState.STARTUP_DELAY
                 self.state_start_time = time.time()
 
-            print("✓ All systems initialized successfully")
+            print("All systems initialized successfully")
             return True
 
         except Exception as e:
-            print(f"✗ Initialization failed: {e}")
+            print(f"Initialization failed: {e}")
             with self.state_lock:
                 self.state = EraserState.ERROR
             return False
@@ -264,7 +264,7 @@ class WhiteboardEraserMain:
             self.camera_thread = threading.Thread(target=self._camera_processing_loop, daemon=True)
             self.camera_thread.start()
 
-        print("🚗 Whiteboard eraser started!")
+        print("Whiteboard eraser started!")
         print("Press Ctrl+C to stop")
 
         # Main thread monitoring
@@ -348,7 +348,7 @@ class WhiteboardEraserMain:
                 # Debug: print detection status occasionally
                 detection_count += 1
                 if detection_count % 10 == 0:  # Every 10 frames
-                    print(f"🎥 Camera frame {detection_count}: {len(car_markings)} markings detected")
+                    print(f"Camera frame {detection_count}: {len(car_markings)} markings detected")
 
                 if car_markings:
                     # Update localization with calibrated encoder readings
@@ -391,9 +391,9 @@ class WhiteboardEraserMain:
             try:
                 if self.car_controller.gyro.is_calibrated:
                     self.gyro_calibration_complete = True
-                    print("✓ Gyroscope calibration complete")
+                    print("Gyroscope calibration complete")
                 elif elapsed_time > 8.0:  # Force calibration if needed
-                    print("🔧 Force-starting gyro calibration...")
+                    print("Force-starting gyro calibration...")
                     self.car_controller.gyro.calibrate(samples=self.config.gyro_calibration_samples, show_progress=False)
                     self.gyro_calibration_complete = True
             except:
@@ -402,14 +402,14 @@ class WhiteboardEraserMain:
 
         # Wait for full startup delay
         if elapsed_time >= self.config.startup_delay and self.gyro_calibration_complete:
-            print(f"✓ Startup delay complete ({self.config.startup_delay}s)")
+            print(f"Startup delay complete ({self.config.startup_delay}s)")
 
             # Reset position
             self.localization.reset_position(0, 0, 0)
 
             # Use default whiteboard orientation (no mapping needed)
             if not self.whiteboard_mapped:
-                print("📐 Using default whiteboard orientation (no mapping)")
+                print("Using default whiteboard orientation (no mapping)")
                 self.whiteboard_up_angle = np.radians(90)    # Up is 90°
                 self.whiteboard_down_angle = np.radians(270)  # Down is 270°
                 self.whiteboard_left_angle = np.radians(180)  # Left is 180°
@@ -420,15 +420,15 @@ class WhiteboardEraserMain:
                 self.pathfinder.whiteboard_up_direction = self.whiteboard_up_angle
 
             # Skip mapping and scanning - go straight to waiting for markings
-            print("🔍 Ready to detect markings (robot stationary)...")
+            print("Ready to detect markings (robot stationary)")
             with self.state_lock:
                 self.state = EraserState.SCANNING
                 self.state_start_time = time.time()
         else:
             remaining = max(0, self.config.startup_delay - elapsed_time)
             if int(elapsed_time) % 2 == 0 and elapsed_time > 0:  # Print every 2 seconds
-                gyro_status = "✓" if self.gyro_calibration_complete else "⏳"
-                print(f"⏱️  Startup: {remaining:.1f}s remaining, Gyro: {gyro_status}")
+                gyro_status = "ready" if self.gyro_calibration_complete else "calibrating"
+                print(f"Startup: {remaining:.1f}s remaining, gyro: {gyro_status}")
 
     def _handle_whiteboard_mapping_state(self):
         """Handle whiteboard orientation mapping - drive in circle to map gyro angles to whiteboard directions"""
@@ -442,7 +442,7 @@ class WhiteboardEraserMain:
                     self.mapping_start_angle = np.radians(initial_heading)
                     self.whiteboard_right_angle = self.mapping_start_angle  # Car starts facing right
                     self.mapping_angles = []
-                    print(f"🧭 Starting orientation mapping from {initial_heading:.1f}° (right edge)")
+                    print(f"Starting orientation mapping from {initial_heading:.1f}deg (right edge)")
                 except:
                     self.mapping_start_angle = 0.0
                     self.whiteboard_right_angle = 0.0
@@ -473,24 +473,24 @@ class WhiteboardEraserMain:
                     # 90° - should be pointing up (against gravity)
                     self.whiteboard_up_angle = current_angle
                     self.mapping_angles.append(('up', current_angle))
-                    print(f"📍 Mapped UP direction: {np.degrees(current_angle):.1f}°")
+                    print(f"Mapped UP direction: {np.degrees(current_angle):.1f}deg")
 
                 elif progress >= 2 * quarter_turn and len(self.mapping_angles) == 1:
                     # 180° - should be pointing left
                     self.whiteboard_left_angle = current_angle
                     self.mapping_angles.append(('left', current_angle))
-                    print(f"📍 Mapped LEFT direction: {np.degrees(current_angle):.1f}°")
+                    print(f"Mapped LEFT direction: {np.degrees(current_angle):.1f}deg")
 
                 elif progress >= 3 * quarter_turn and len(self.mapping_angles) == 2:
                     # 270° - should be pointing down (with gravity)
                     self.whiteboard_down_angle = current_angle
                     self.mapping_angles.append(('down', current_angle))
-                    print(f"📍 Mapped DOWN direction: {np.degrees(current_angle):.1f}°")
+                    print(f"Mapped DOWN direction: {np.degrees(current_angle):.1f}deg")
 
                 elif progress >= 4 * quarter_turn and len(self.mapping_angles) == 3:
                     # 360° - back to right, confirm mapping
                     self.mapping_angles.append(('right_confirm', current_angle))
-                    print(f"📍 Completed circle: {np.degrees(current_angle):.1f}° (back to right)")
+                    print(f"Completed circle: {np.degrees(current_angle):.1f}deg (back to right)")
 
                 # Print progress occasionally
                 if int(elapsed_time) % 3 == 0 and elapsed_time > 3:
@@ -498,11 +498,11 @@ class WhiteboardEraserMain:
                     # Show encoder feedback for debugging
                     left_revs = self.car_controller.left_motor.get_revolutions()
                     right_revs = self.car_controller.right_motor.get_revolutions()
-                    print(f"🧭 Mapping... {len(self.mapping_angles)}/4 directions, {remaining_time:.1f}s remaining")
-                    print(f"   Motors: L={left_revs:.2f} revs, R={right_revs:.2f} revs, heading={current_heading:.1f}°")
+                    print(f"Mapping... {len(self.mapping_angles)}/4 directions, {remaining_time:.1f}s remaining")
+                    print(f"  Motors: L={left_revs:.2f} revs, R={right_revs:.2f} revs, heading={current_heading:.1f}deg")
 
             except Exception as e:
-                print(f"⚠️ Error reading gyro during mapping: {e}")
+                print(f"Error reading gyro during mapping: {e}")
 
         else:
             # Stop and finalize mapping
@@ -510,11 +510,11 @@ class WhiteboardEraserMain:
 
             if len(self.mapping_angles) >= 3:
                 self.whiteboard_mapped = True
-                print("✓ Whiteboard orientation mapping complete:")
-                print(f"  Right (start): {np.degrees(self.whiteboard_right_angle):.1f}°")
-                print(f"  Up (↑):        {np.degrees(self.whiteboard_up_angle):.1f}°")
-                print(f"  Left (←):      {np.degrees(self.whiteboard_left_angle):.1f}°")
-                print(f"  Down (↓):      {np.degrees(self.whiteboard_down_angle):.1f}°")
+                print("Whiteboard orientation mapping complete:")
+                print(f"  Right (start): {np.degrees(self.whiteboard_right_angle):.1f}deg")
+                print(f"  Up:            {np.degrees(self.whiteboard_up_angle):.1f}deg")
+                print(f"  Left:          {np.degrees(self.whiteboard_left_angle):.1f}deg")
+                print(f"  Down:          {np.degrees(self.whiteboard_down_angle):.1f}deg")
 
                 # Save orientation mapping for future use
                 try:
@@ -528,16 +528,16 @@ class WhiteboardEraserMain:
                     }
                     with open('whiteboard_orientation.json', 'w') as f:
                         json.dump(orientation_data, f, indent=2)
-                    print("💾 Orientation mapping saved to whiteboard_orientation.json")
+                    print("Orientation mapping saved to whiteboard_orientation.json")
                 except Exception as e:
-                    print(f"⚠️ Could not save orientation mapping: {e}")
+                    print(f"Could not save orientation mapping: {e}")
 
                 # Update pathfinder with whiteboard orientation
                 self.pathfinder.whiteboard_up_direction = self.whiteboard_up_angle
-                print("✓ Pathfinder updated with gravity-aware navigation")
+                print("Pathfinder updated with gravity-aware navigation")
 
             else:
-                print("⚠️ Incomplete orientation mapping - using defaults")
+                print("Incomplete orientation mapping - using defaults")
                 # Set default orientations (assuming gyro 0° = right)
                 self.whiteboard_right_angle = 0.0
                 self.whiteboard_up_angle = np.pi / 2
@@ -548,7 +548,7 @@ class WhiteboardEraserMain:
                 # Update pathfinder with default orientation
                 self.pathfinder.whiteboard_up_direction = self.whiteboard_up_angle
 
-            print("🔍 Starting marking detection scan...")
+            print("Starting marking detection scan")
             with self.state_lock:
                 self.state = EraserState.INITIAL_SCAN
                 self.state_start_time = time.time()
@@ -577,24 +577,24 @@ class WhiteboardEraserMain:
                     pose = self.localization.get_pose()
                     last_marking = markings[-1]
                     direction = self.get_movement_direction_type(pose.x, pose.y, last_marking.x, last_marking.y)
-                    print(f"🔍 Scanning... {len(markings)} markings found, {remaining_time:.1f}s remaining")
-                    print(f"    Last marking direction: {direction}")
+                    print(f"Scanning... {len(markings)} markings found, {remaining_time:.1f}s remaining")
+                    print(f"  Last marking direction: {direction}")
                 else:
-                    print(f"🔍 Scanning... {len(markings)} markings found, {remaining_time:.1f}s remaining")
+                    print(f"Scanning... {len(markings)} markings found, {remaining_time:.1f}s remaining")
 
         else:
             # Stop and evaluate findings
             self.car_controller.stop_all_motors()
             markings = self.global_map.get_active_markings()
 
-            print(f"✓ Initial scan complete - found {len(markings)} markings")
+            print(f"Initial scan complete - found {len(markings)} markings")
 
             if len(markings) > 0:
-                print("🎯 Beginning systematic erasing...")
+                print("Beginning systematic erasing")
                 with self.state_lock:
                     self.state = EraserState.PLANNING
             else:
-                print("🔍 No markings found, continuing to search...")
+                print("No markings found, continuing to search")
                 with self.state_lock:
                     self.state = EraserState.SCANNING
 
@@ -725,8 +725,7 @@ class WhiteboardEraserMain:
         if abs(pose.x) < 1.0 and abs(pose.y) < 1.0 and elapsed_time > 2.0:
             # Position hasn't updated from (0,0) - encoders likely not working
             if elapsed_time > self.expected_nav_time * 1.2:  # Add 20% margin
-                print(f"⚠️ Odometry not updating (stuck at origin), using time-based navigation")
-                print(f"Traveled for {elapsed_time:.1f}s (expected {self.expected_nav_time:.1f}s), assuming target reached")
+                print(f"Odometry not updating (stuck at origin), using time-based nav")
                 self.car_controller.stop_all_motors()
                 time.sleep(0.5)  # Let motors stop
                 with self.state_lock:
@@ -785,7 +784,7 @@ class WhiteboardEraserMain:
 
     def _handle_completed_state(self):
         """Handle completion state"""
-        print("🎉 Erasing task completed!")
+        print("Erasing task completed!")
         self._print_final_statistics()
         self.car_controller.stop_all_motors()
 
@@ -797,7 +796,7 @@ class WhiteboardEraserMain:
 
     def _handle_error_state(self):
         """Handle error state"""
-        print("❌ System in error state")
+        print("System in error state")
         self.car_controller.emergency_stop()
         time.sleep(1.0)
 
@@ -823,17 +822,17 @@ class WhiteboardEraserMain:
 
         elapsed_time = time.time() - self.start_time
 
-        print(f"\n📊 Status (t={elapsed_time:.0f}s):")
+        print(f"\nStatus (t={elapsed_time:.0f}s):")
         print(f"  State: {current_state.value}")
 
         if current_state not in [EraserState.STARTUP_DELAY]:
-            print(f"  Position: ({pose.x:.1f}, {pose.y:.1f}), θ={np.degrees(pose.theta):.1f}°")
+            print(f"  Position: ({pose.x:.1f}, {pose.y:.1f}), theta={np.degrees(pose.theta):.1f}deg")
             print(f"  Car: {car_status.state.value}, speed={car_status.linear_velocity:.1f}mm/s")
             print(f"  Markings: {progress['total_detected']} detected, {progress['total_erased']} erased")
             print(f"  Progress: {progress['progress_percent']:.1f}%")
 
         if self.whiteboard_mapped:
-            print(f"  Whiteboard: Up={np.degrees(self.whiteboard_up_angle):.0f}°, Down={np.degrees(self.whiteboard_down_angle):.0f}°")
+            print(f"  Whiteboard: Up={np.degrees(self.whiteboard_up_angle):.0f}deg, Down={np.degrees(self.whiteboard_down_angle):.0f}deg")
         else:
             print(f"  Whiteboard: Not mapped")
 
@@ -843,11 +842,11 @@ class WhiteboardEraserMain:
             print(f"  Target: ({target_x:.1f}, {target_y:.1f}), distance={distance:.1f}mm")
 
     def _print_final_statistics(self):
-        """Print final performance statistics"""
+        """print final performance statistics"""
         elapsed_time = time.time() - self.start_time
         progress = self.global_map.estimate_completion_progress()
 
-        print("\n🏁 Final Statistics:")
+        print("\nFinal Statistics:")
         print(f"  Total time: {elapsed_time:.1f}s ({elapsed_time/60:.1f} minutes)")
         print(f"  Total markings detected: {progress['total_detected']}")
         print(f"  Total markings erased: {progress['total_erased']}")
@@ -859,12 +858,12 @@ class WhiteboardEraserMain:
             print(f"  Detection performance: {perf_stats['avg_time_ms']:.1f}ms avg ({perf_stats['fps']:.1f} FPS)")
 
     def shutdown(self):
-        """Graceful shutdown of all systems"""
+        """graceful shutdown of all systems"""
         # Prevent double-shutdown
         if hasattr(self, '_shutdown_complete') and self._shutdown_complete:
             return
 
-        print("\n🛑 Shutting down whiteboard eraser...")
+        print("\nShutting down whiteboard eraser...")
 
         self.shutdown_requested = True
         self.running = False
@@ -911,10 +910,10 @@ class WhiteboardEraserMain:
             self.camera_thread.join(timeout=2.0)
 
         self._shutdown_complete = True
-        print("✓ Shutdown complete")
+        print("Shutdown complete")
 
     def _load_whiteboard_orientation(self):
-        """Load whiteboard orientation from previous run if available"""
+        """load whiteboard orientation from previous run if available"""
         try:
             import json
             with open('whiteboard_orientation.json', 'r') as f:
@@ -926,17 +925,17 @@ class WhiteboardEraserMain:
             self.whiteboard_down_angle = orientation_data.get('whiteboard_down_angle', 3*np.pi/2)
             self.whiteboard_mapped = True
 
-            print(f"🧭 Loaded whiteboard orientation: Up={np.degrees(self.whiteboard_up_angle):.1f}°")
+            print(f"Loaded whiteboard orientation: Up={np.degrees(self.whiteboard_up_angle):.1f}deg")
 
             # Update pathfinder if it exists
             if hasattr(self, 'pathfinder') and self.pathfinder:
                 self.pathfinder.whiteboard_up_direction = self.whiteboard_up_angle
 
         except FileNotFoundError:
-            print("🧭 No previous whiteboard orientation found - will map on startup")
+            print("No previous whiteboard orientation found - will map on startup")
             self.whiteboard_mapped = False
         except Exception as e:
-            print(f"⚠️ Error loading whiteboard orientation: {e}")
+            print(f"Error loading whiteboard orientation: {e}")
             self.whiteboard_mapped = False
 
     def get_movement_direction_type(self, from_x: float, from_y: float,

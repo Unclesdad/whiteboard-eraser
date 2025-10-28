@@ -1,30 +1,19 @@
 #!/usr/bin/env python3
-"""
-Simple Marking Detection - Back to Basics
-Focus on actual pen markings with minimal filtering
-"""
-
 import cv2
 import numpy as np
 import time
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from dataclasses import dataclass
 
 @dataclass
 class Marking:
-    """Represents a detected marking in camera coordinates"""
-    x: float  # pixels from left
-    y: float  # pixels from top
-    area: float  # pixels squared
-    confidence: float  # 0.0 to 1.0
-    bbox: Tuple[int, int, int, int]  # (x, y, width, height)
+    x: float
+    y: float
+    area: float
+    confidence: float
+    bbox: Tuple[int, int, int, int]
 
 class SimpleMarkingDetector:
-    """
-    Simple marking detector - back to basics approach
-    Finds the whiteboard top edge and detects markings below it
-    """
-
     def __init__(self,
                  camera_height_mm: float = 135.0,
                  camera_angle_deg: float = 20.7,
@@ -42,150 +31,93 @@ class SimpleMarkingDetector:
         self.image_height = image_height
         self.debug = debug
 
-        # Simple detection parameters - tuned for actual markings vs reflections
-        self.min_marking_area = 2    # Ignore 1-pixel noise
-        self.max_marking_area = 100  # Reject large solid blobs (reflections)
-        self.marking_threshold = 120  # Darkness threshold - pen marks are darker than this
+        self.min_marking_area = 2
+        self.max_marking_area = 100
+        self.marking_threshold = 120
         self.gaussian_blur_size = 3
+        self.max_solidity = 0.85
+        self.edge_exclusion_pixels = 15
+        self.whiteboard_threshold = 140
+        self.whiteboard_area_threshold = 1000
+        self.top_edge_search_height = 200
 
-        # Shape filtering to distinguish markings from reflections
-        self.max_solidity = 0.85  # Solid blobs (reflections) have solidity near 1.0
-                                  # Markings (thin strokes) have lower solidity
-
-        # Edge exclusion parameters
-        self.edge_exclusion_pixels = 15  # Exclude markings within 15 pixels of whiteboard edge
-
-        # Whiteboard detection - much simpler
-        self.whiteboard_threshold = 140  # Lower threshold for whiteboard detection
-        self.whiteboard_area_threshold = 1000  # Minimum area for valid whiteboard surface
-        self.top_edge_search_height = 200  # Only look in top 200 pixels for edge
-
-        # Morphological operations
         self.erode_kernel = np.ones((2, 2), np.uint8)
         self.dilate_kernel = np.ones((3, 3), np.uint8)
 
-        # Performance tracking
         self.processing_times = []
-
-        # Debug info
         self.last_whiteboard_mask = None
 
-        # Calculate pixel-to-mm conversion factors
         self._calculate_pixel_to_mm_factors()
 
-        print(f"SimpleMarkingDetector initialized:")
-        print(f"  Very permissive thresholds for maximum detection")
+        if self.debug:
+            print(f"SimpleMarkingDetector initialized")
+            print(f"  permissive thresholds for max detection")
 
     def _calculate_pixel_to_mm_factors(self):
-        """Calculate conversion factors from pixels to millimeters
-
-        Simplified model: Calculate at center viewing angle
-        """
-        # Distance forward at center of image
         center_distance = self.camera_height_mm / np.tan(self.camera_angle_rad)
-
-        # Horizontal coverage at this distance
         horizontal_coverage_mm = 2 * center_distance * np.tan(self.fov_horizontal_rad / 2)
-
-        # Store for X coordinate conversion
         self.mm_per_pixel_x = horizontal_coverage_mm / self.image_width
 
-        # For debugging
         if self.debug:
-            print(f"  Camera geometry: center distance={center_distance:.0f}mm, H width={horizontal_coverage_mm:.0f}mm")
-            print(f"  Conversion: {self.mm_per_pixel_x:.2f} mm/px horizontal")
+            print(f"  center dist={center_distance:.0f}mm, H width={horizontal_coverage_mm:.0f}mm")
+            print(f"  {self.mm_per_pixel_x:.2f} mm/px horiz")
 
     def rotate_image_180(self, image: np.ndarray) -> np.ndarray:
-        """Rotate image 180 degrees to correct upside-down camera mounting"""
         return cv2.rotate(image, cv2.ROTATE_180)
 
     def find_white_surface(self, image: np.ndarray) -> np.ndarray:
-        """
-        Find the whiteboard surface using simple brightness thresholding
-        1. Create white mask from brightness
-        2. Find blob that touches bottom edge
-        3. Return that blob as surface
-
-        Returns:
-            Binary mask where white pixels represent the whiteboard surface
-        """
+        """find whiteboard by thresholding brightness, then flood-fill from bottom edge
+        to get the connected region (preserves marking holes unlike connected components)"""
         height, width = image.shape[:2]
-
-        # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Simple brightness thresholding - pixels above threshold = white
-        brightness_threshold = 180  # Adjust this value as needed
+        brightness_threshold = 180
         _, white_mask = cv2.threshold(gray, brightness_threshold, 255, cv2.THRESH_BINARY)
 
-        # Clean up the mask slightly
         kernel = np.ones((3, 3), np.uint8)
         white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
 
-        # Use flood fill from bottom edge to find connected whiteboard area
-        # This preserves holes (markings) unlike connected components
         bottom_row = height - 1
         surface_mask = np.zeros_like(white_mask, dtype=np.uint8)
 
-        # Create a slightly larger image for flood fill (opencv requirement)
         h, w = white_mask.shape
         flood_mask = np.zeros((h + 2, w + 2), np.uint8)
 
-        # Find all white pixels on the bottom edge
         bottom_white_pixels = []
         for x in range(width):
             if white_mask[bottom_row, x] > 0:
                 bottom_white_pixels.append((x, bottom_row))
 
         if bottom_white_pixels:
-            # Start flood fill from the first bottom white pixel
             start_x, start_y = bottom_white_pixels[0]
+            cv2.floodFill(white_mask, flood_mask, (start_x, start_y), 128)
 
-            # Flood fill to find all connected white areas
-            # This preserves holes because we're working with the original thresholded mask
-            cv2.floodFill(white_mask, flood_mask, (start_x, start_y), 128)  # Use gray value to mark flooded area
-
-            # Create surface mask from flooded area, but preserve original brightness threshold
-            # Areas marked as 128 are the connected whiteboard region
             flooded_area = (white_mask == 128)
-
-            # Apply the flooded area to the ORIGINAL brightness threshold to preserve holes
+            # re-apply original threshold to preserve holes
             original_threshold = cv2.threshold(gray, brightness_threshold, 255, cv2.THRESH_BINARY)[1]
             surface_mask = np.where(flooded_area, original_threshold, 0).astype(np.uint8)
 
-            # Restore the white_mask for consistency
             white_mask[white_mask == 128] = 255
-
         else:
-            # Fallback: use bottom portion of image
-            print(f"  No bottom-connected blob found, using fallback")
+            print(f"  no bottom blob, using fallback")
             fallback_start = int(height * 0.5)
             surface_mask[fallback_start:, :] = 255
 
         return surface_mask
 
     def _analyze_blob_shape(self, contour: np.ndarray) -> dict:
-        """
-        Analyze blob shape to distinguish markings from reflections
-
-        Returns:
-            dict with shape metrics: solidity, aspect_ratio, perimeter_area_ratio
-        """
+        """get shape metrics to filter out reflections (solid blobs) vs markings (irregular)"""
         area = cv2.contourArea(contour)
 
-        # Calculate solidity (area / convex hull area)
-        # Solid blobs (reflections) have solidity near 1.0
-        # Thin irregular markings have lower solidity
+        # solidity = area / convex hull area
+        # reflections ~1.0, markings lower
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
         solidity = area / hull_area if hull_area > 0 else 0.0
 
-        # Calculate aspect ratio
         x, y, w, h = cv2.boundingRect(contour)
         aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 1.0
 
-        # Calculate perimeter to area ratio
-        # Thin markings have high ratio, solid blobs have low ratio
         perimeter = cv2.arcLength(contour, True)
         perimeter_area_ratio = perimeter / area if area > 0 else 0.0
 
@@ -197,96 +129,55 @@ class SimpleMarkingDetector:
         }
 
     def _is_likely_marking(self, shape_metrics: dict) -> tuple[bool, str]:
-        """
-        Determine if blob is likely a marking (vs reflection)
-
-        Returns:
-            (is_marking, reason)
-        """
+        """check if blob passes filters for being a marking"""
         area = shape_metrics['area']
         solidity = shape_metrics['solidity']
 
-        # Check area bounds
         if area < self.min_marking_area:
             return False, f"too_small ({area:.1f}px < {self.min_marking_area})"
 
         if area > self.max_marking_area:
             return False, f"too_large ({area:.1f}px > {self.max_marking_area})"
 
-        # Check solidity - reject solid blobs (reflections)
         if solidity > self.max_solidity:
             return False, f"too_solid (solidity={solidity:.2f})"
 
         return True, "valid_marking"
 
     def _create_edge_exclusion_mask(self, white_surface_mask: np.ndarray) -> np.ndarray:
-        """
-        Create a mask that excludes only areas near the whiteboard boundary,
-        preserving the full interior for marking detection.
-        """
-        # Start with the full white surface
+        """exclude areas near whiteboard edges to avoid false detections"""
         detection_mask = white_surface_mask.copy()
-
-        # Find the contour of the whiteboard boundary
         contours, _ = cv2.findContours(white_surface_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
-            # Get the largest contour (main whiteboard boundary)
             largest_contour = max(contours, key=cv2.contourArea)
-
-            # Create a mask for the boundary exclusion zone
             boundary_mask = np.zeros_like(white_surface_mask)
-
-            # Draw the contour with much thinner line for exclusion zone
-            cv2.drawContours(boundary_mask, [largest_contour], -1, 255, thickness=5)  # Fixed 5-pixel thickness
-
-            # Remove the boundary zone from the detection mask
+            cv2.drawContours(boundary_mask, [largest_contour], -1, 255, thickness=5)
             detection_mask = cv2.bitwise_and(detection_mask, cv2.bitwise_not(boundary_mask))
 
         return detection_mask
 
     def detect_markings(self, image: np.ndarray) -> List[Marking]:
-        """
-        Detect markings using white surface detection approach
-
-        1. Find white drawing surface
-        2. Look for dark spots only within that surface
-        3. Minimal filtering for speed
-        """
+        """find markings by detecting holes in the white surface"""
         start_time = time.time()
-
-        # Correct camera orientation
         corrected = self.rotate_image_180(image)
 
-        # Debug: Print actual image dimensions being processed
         if self.debug:
             height, width = corrected.shape[:2]
             print(f"  Processing frame: {width}x{height}")
 
-        # Find white surface directly from color image
         white_surface_mask = self.find_white_surface(corrected)
         self.last_whiteboard_mask = white_surface_mask
 
-        # Create edge exclusion mask to avoid detecting boundary artifacts as markings
         detection_mask = self._create_edge_exclusion_mask(white_surface_mask)
 
-        # SIMPLE HOLE DETECTION APPROACH:
-        # Find black holes directly within the white surface mask
-        # The white surface already has holes where markings are - detect them directly
-
-        # Method: Invert the white surface mask to find holes, then find contours
-        # This preserves the exact holes that exist in the surface detection
-
-        # Create inverse of white surface mask - holes become white blobs
+        # invert surface mask to find holes (markings show up as holes in white surface)
         holes_mask = cv2.bitwise_not(white_surface_mask)
 
-        # Only keep holes that are completely surrounded by white surface
-        # Use very light morphological operations to preserve small markings
-        kernel = np.ones((2, 2), np.uint8)  # Smaller kernel to preserve small holes
-        holes_mask = cv2.morphologyEx(holes_mask, cv2.MORPH_OPEN, kernel)  # Remove small noise
+        kernel = np.ones((2, 2), np.uint8)
+        holes_mask = cv2.morphologyEx(holes_mask, cv2.MORPH_OPEN, kernel)
 
-        # Further filter: only keep holes that are INSIDE the detection mask (away from edges)
-        # This ensures we don't detect edge artifacts as markings
+        # only keep holes away from edges
         holes_mask = cv2.bitwise_and(holes_mask, detection_mask)
 
         if self.debug:
@@ -328,17 +219,15 @@ class SimpleMarkingDetector:
         rejected_count = {'too_small': 0, 'too_large': 0, 'too_solid': 0, 'near_edge': 0}
 
         for contour in contours:
-            # Analyze blob shape
             shape_metrics = self._analyze_blob_shape(contour)
             is_marking, reason = self._is_likely_marking(shape_metrics)
 
-            if self.debug and len(markings) < 10:  # Only print first 10 for brevity
+            if self.debug and len(markings) < 10:
                 area = shape_metrics['area']
                 solidity = shape_metrics['solidity']
                 print(f"    Contour {len(markings)}: area={area:.1f}, solidity={solidity:.2f}, {reason}")
 
             if not is_marking:
-                # Track rejection reason
                 if 'too_small' in reason:
                     rejected_count['too_small'] += 1
                 elif 'too_large' in reason:
@@ -347,32 +236,22 @@ class SimpleMarkingDetector:
                     rejected_count['too_solid'] += 1
                 continue
 
-            # Get bounding box
             x, y, w, h = cv2.boundingRect(contour)
             center_x = x + w / 2
             center_y = y + h / 2
 
-            # Check if marking center is within detection area (not too close to edges)
             if detection_mask[int(center_y), int(center_x)] > 0:
-                # Improved confidence scoring:
-                # - Smaller irregular shapes = higher confidence (likely markings)
-                # - Larger solid shapes = lower confidence (likely reflections)
                 area = shape_metrics['area']
                 solidity = shape_metrics['solidity']
 
-                # Area score: smaller is better (inverse relationship)
-                # Scale from min_area to max_area, smaller = higher score
+                # confidence: smaller + more irregular = better
                 area_score = 1.0 - ((area - self.min_marking_area) /
                                    (self.max_marking_area - self.min_marking_area))
                 area_score = max(0.0, min(1.0, area_score))
-
-                # Solidity score: lower solidity = higher score (irregular is good)
-                # Invert so that low solidity (0.3) → high score (0.9)
                 solidity_score = 1.0 - solidity
 
-                # Combine scores with weights
                 confidence = (area_score * 0.4 + solidity_score * 0.6)
-                confidence = max(0.2, min(1.0, confidence))  # Clamp to [0.2, 1.0]
+                confidence = max(0.2, min(1.0, confidence))
 
                 marking = Marking(
                     x=center_x,
@@ -387,7 +266,6 @@ class SimpleMarkingDetector:
                 if self.debug and len(markings) < 5:
                     print(f"    Skipped contour at ({center_x:.0f},{center_y:.0f}) - too close to edge")
 
-        # Track processing time
         processing_time = time.time() - start_time
         self.processing_times.append(processing_time)
         if len(self.processing_times) > 100:
@@ -400,63 +278,43 @@ class SimpleMarkingDetector:
             contour_count = len(contours)
             print(f"  Blob detection: White={white_area:.0f}px, Holes={holes_area:.0f}px, Contours={contour_count}")
 
-            # Show rejection statistics
             total_rejected = sum(rejected_count.values())
             print(f"  Rejections: {total_rejected} total")
             print(f"    - Too small (<{self.min_marking_area}px): {rejected_count['too_small']}")
             print(f"    - Too large (>{self.max_marking_area}px): {rejected_count['too_large']}")
             print(f"    - Too solid (>{self.max_solidity}): {rejected_count['too_solid']}")
             print(f"    - Near edge: {rejected_count['near_edge']}")
-
-            # Show accepted markings count
-            print(f"  ✓ Accepted markings: {len(markings)}")
+            print(f"  Accepted markings: {len(markings)}")
 
         return markings
 
     def pixel_to_camera_relative_mm(self, pixel_x: float, pixel_y: float) -> Tuple[float, float]:
-        """Convert pixel coordinates to millimeters relative to camera position
-
-        Simplified model for low-mounted camera:
-        - Camera at 75mm height looks down at surface
-        - Use direct angular projection for small distances
-        """
+        """convert pixel coords to mm relative to camera using angular projection"""
         center_x_px = self.image_width / 2
-        center_y_px = self.image_height / 2
 
-        # X coordinate: straightforward horizontal mapping
         dx_px = pixel_x - center_x_px
         x_mm = dx_px * self.mm_per_pixel_x
 
-        # Y coordinate: map pixel Y to viewing angle, then to ground distance
-        # Normalize pixel position: -0.5 (top) to +0.5 (bottom)
+        # map pixel y to viewing angle, then to ground distance
         y_normalized = (pixel_y / self.image_height) - 0.5
-
-        # Angle from camera optical axis
         angle_from_center = y_normalized * self.fov_vertical_rad
-
-        # Total angle from horizontal
         viewing_angle = self.camera_angle_rad + angle_from_center
+        viewing_angle = np.clip(viewing_angle, 0.087, 1.57)
 
-        # Clamp viewing angle to reasonable range (must be looking down)
-        viewing_angle = np.clip(viewing_angle, 0.087, 1.57)  # 5° to 90°
-
-        # Distance along ground from point directly below camera
         distance_forward = self.camera_height_mm / np.tan(viewing_angle)
-
-        # Return forward distance (positive = forward of camera)
         y_mm = distance_forward
 
         return x_mm, y_mm
 
     def camera_relative_to_car_center_mm(self, camera_x_mm: float, camera_y_mm: float) -> Tuple[float, float]:
-        """Convert camera-relative coordinates to car center coordinates"""
+        """convert from camera coords to car center coords"""
         car_center_offset_mm = 110
         car_x_mm = camera_x_mm
         car_y_mm = camera_y_mm - car_center_offset_mm
         return car_x_mm, car_y_mm
 
     def detect_and_convert_to_car_coordinates(self, image: np.ndarray) -> List[Tuple[float, float, float]]:
-        """Detect markings and convert to car-relative coordinates"""
+        """detect markings and return as car-relative coordinates"""
         markings = self.detect_markings(image)
         car_markings = []
 
@@ -468,63 +326,48 @@ class SimpleMarkingDetector:
         return car_markings
 
     def visualize_detections(self, image: np.ndarray, markings: List[Marking], whiteboard_mask: np.ndarray = None) -> np.ndarray:
-        """Create debug visualization"""
+        """draw detected markings on image for debugging"""
         if not self.debug:
             return image
 
-        # Correct image orientation
         vis_image = self.rotate_image_180(image.copy())
-
-        # Draw white surface boundary - use provided mask or scale up the stored one
         mask_to_use = whiteboard_mask if whiteboard_mask is not None else self.last_whiteboard_mask
 
         if mask_to_use is not None:
-            # If mask resolution doesn't match image, scale it up
             if mask_to_use.shape != vis_image.shape[:2]:
                 mask_to_use = cv2.resize(mask_to_use, (vis_image.shape[1], vis_image.shape[0]))
 
-            # Find contours of the white surface
             contours, _ = cv2.findContours(mask_to_use, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
-                # Draw the boundary of the largest white surface
                 largest_contour = max(contours, key=cv2.contourArea)
-                cv2.drawContours(vis_image, [largest_contour], -1, (0, 255, 255), 2)  # Yellow boundary
+                cv2.drawContours(vis_image, [largest_contour], -1, (0, 255, 255), 2)
 
-            # Add text
             white_area = np.sum(mask_to_use) / 255.0
             cv2.putText(vis_image, f"White surface: {white_area:.0f}px",
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-        # Draw markings with simple color coding
         for i, marking in enumerate(markings):
             x, y, w, h = marking.bbox
 
-            # Color based on confidence
             if marking.confidence > 0.6:
-                color = (0, 255, 0)  # Green - high confidence
+                color = (0, 255, 0)
             elif marking.confidence > 0.3:
-                color = (0, 255, 255)  # Yellow - medium confidence
+                color = (0, 255, 255)
             else:
-                color = (0, 128, 255)  # Orange - low confidence
+                color = (0, 128, 255)
 
-            # Draw bounding box
             cv2.rectangle(vis_image, (x, y), (x + w, y + h), color, 2)
-
-            # Draw center point
             center = (int(marking.x), int(marking.y))
             cv2.circle(vis_image, center, 3, (255, 0, 0), -1)
 
-            # Add marking info
             text = f"M{i}: {marking.confidence:.2f}"
             cv2.putText(vis_image, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            # Convert to car coordinates
             cam_x, cam_y = self.pixel_to_camera_relative_mm(marking.x, marking.y)
             car_x, car_y = self.camera_relative_to_car_center_mm(cam_x, cam_y)
             coord_text = f"({car_x:.0f},{car_y:.0f}mm)"
             cv2.putText(vis_image, coord_text, (x, y + h + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # Add performance info
         if self.processing_times:
             avg_time = np.mean(self.processing_times)
             fps = 1.0 / avg_time if avg_time > 0 else 0
@@ -535,7 +378,6 @@ class SimpleMarkingDetector:
         return vis_image
 
     def get_performance_stats(self) -> dict:
-        """Get performance statistics"""
         if not self.processing_times:
             return {"avg_time_ms": 0, "fps": 0, "samples": 0}
 

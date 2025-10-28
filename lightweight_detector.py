@@ -96,17 +96,17 @@ class StaticImageHandler(SimpleHTTPRequestHandler):
         pass
 
 def start_image_server():
-    """Start minimal HTTP server in background thread"""
+    """start minimal HTTP server in background thread"""
     server = HTTPServer(('', 8000), StaticImageHandler)
-    print(f"🌐 Image server started at http://localhost:8000")
-    print(f"📷 Serving startup image: {STARTUP_IMAGE_PATH}\n")
+    print(f"Image server started at http://localhost:8000")
+    print(f"Serving startup image: {STARTUP_IMAGE_PATH}\n")
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     return server
 
 def main():
     print("=" * 60)
-    print("🔋 LIGHTWEIGHT MARKING DETECTOR - Battery Optimized")
+    print("LIGHTWEIGHT MARKING DETECTOR - Battery Optimized")
     print("=" * 60)
     print(f"Camera: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
     print(f"Processing: {PROCESSING_WIDTH}x{PROCESSING_HEIGHT}")
@@ -120,7 +120,7 @@ def main():
 
     try:
         # Initialize camera with minimal power settings
-        print("\n📷 Initializing camera...")
+        print("\nInitializing camera...")
         picam2 = Picamera2(camera_num=0)
 
         # Video configuration to match simple_camera_stream.py
@@ -139,10 +139,10 @@ def main():
             "Contrast": 2,              # Higher contrast for better marking distinction
         }
         picam2.set_controls(controls)
-        print(f"✓ Camera configured: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
+        print(f"Camera configured: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
 
         # Initialize detector
-        print("\n🔍 Initializing detector...")
+        print("\nInitializing detector...")
         detector = SimpleMarkingDetector(
             camera_height_mm=75.0,
             camera_angle_deg=20.5,
@@ -150,17 +150,17 @@ def main():
             image_height=PROCESSING_HEIGHT,
             debug=False  # Disable debug to save processing
         )
-        print("✓ Detector initialized")
+        print("Detector initialized")
 
         # Start camera
         picam2.start()
         time.sleep(0.5)  # Camera warmup
-        print("✓ Camera started\n")
+        print("Camera started\n")
 
         # Capture and serve startup image if requested
         http_server = None
         if STREAM_IMAGE:
-            print("📸 Capturing startup image...")
+            print("Capturing startup image...")
             startup_frame = picam2.capture_array()
 
             # Convert to BGR
@@ -181,13 +181,13 @@ def main():
 
             # Save annotated image
             cv2.imwrite(STARTUP_IMAGE_PATH, annotated_startup)
-            print(f"✓ Saved startup image: {STARTUP_IMAGE_PATH} ({len(startup_markings)} markings)")
+            print(f"Saved startup image: {STARTUP_IMAGE_PATH} ({len(startup_markings)} markings)")
 
             # Start HTTP server
             http_server = start_image_server()
 
         print("=" * 60)
-        print("📊 DETECTION LOOP RUNNING")
+        print("DETECTION LOOP RUNNING")
         print("=" * 60)
         print("Press Ctrl+C to stop\n")
 
@@ -247,7 +247,7 @@ def main():
                 annotated = detector.visualize_detections(frame, markings)
                 filename = f"detection_{stats.frame_count:06d}.jpg"
                 cv2.imwrite(filename, annotated)
-                print(f"  💾 Saved {filename}")
+                print(f"  Saved {filename}")
 
             # Rate limiting to target FPS
             elapsed = time.time() - loop_start
@@ -257,7 +257,7 @@ def main():
 
     except KeyboardInterrupt:
         print("\n" + "=" * 60)
-        print("🛑 SHUTTING DOWN")
+        print("SHUTTING DOWN")
         print("=" * 60)
 
         # Final stats
@@ -265,7 +265,7 @@ def main():
         avg_fps = stats.fps()
         avg_detections_per_frame = stats.total_detections / stats.frame_count if stats.frame_count > 0 else 0
 
-        print(f"\n📊 Final Statistics:")
+        print(f"\nFinal Statistics:")
         print(f"  Runtime:        {runtime:.1f}s")
         print(f"  Total frames:   {stats.frame_count}")
         print(f"  Average FPS:    {avg_fps:.2f}")
@@ -273,20 +273,20 @@ def main():
         print(f"  Avg per frame:  {avg_detections_per_frame:.2f}")
 
         if frame_times:
-            print(f"\n⚡ Performance:")
+            print(f"\nPerformance:")
             print(f"  Avg frame time:     {np.mean(frame_times)*1000:.1f}ms")
             print(f"  Avg detection time: {np.mean(detection_times)*1000:.1f}ms")
 
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
 
     finally:
-        print("\n🔌 Cleaning up...")
+        print("\nCleaning up...")
         if 'picam2' in locals():
             picam2.stop()
-        print("✓ Complete")
+        print("Complete")
 
 if __name__ == "__main__":
     main()

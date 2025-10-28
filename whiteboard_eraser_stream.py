@@ -253,14 +253,14 @@ class StreamingOutput(io.BufferedIOBase):
         self.merge_distance_mm = 30.0
         self.forget_threshold = 10
 
-        print("✓ Streaming output initialized")
+        print("Streaming output initialized")
 
     def start_detection(self):
-        """Start the detection processing thread"""
+        """start the detection processing thread"""
         self.detection_running = True
         self.detection_thread = threading.Thread(target=self._detection_loop, daemon=True)
         self.detection_thread.start()
-        print("✓ Detection thread started")
+        print("Detection thread started")
 
     def stop_detection(self):
         """Stop the detection processing thread"""
@@ -715,8 +715,8 @@ def main():
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
-    print(f"\n✓ Streaming at http://<pi-ip>:{HTTP_PORT}")
-    print("✓ All systems ready!\n")
+    print(f"\nStreaming at http://<pi-ip>:{HTTP_PORT}")
+    print("All systems ready\n")
 
     # Initialize and run eraser system
     try:
@@ -730,7 +730,7 @@ def main():
         picam2.stop_recording()
         eraser.shutdown()
         server.shutdown()
-        print("✓ Clean shutdown complete")
+        print("Clean shutdown complete")
 
     return 0
 

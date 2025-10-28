@@ -12,7 +12,7 @@ import os
 # Try to import N20Motor with better error handling
 try:
     from motor import N20Motor, DualMotorController, EncoderManager
-    print("✓ Successfully imported N20Motor classes")
+    print("Successfully imported N20Motor classes")
 except ImportError as e:
     print(f"✗ Import error: {e}")
     print("Make sure motor.py contains the N20Motor classes")
@@ -22,10 +22,10 @@ except ImportError as e:
 try:
     from servo import ServoController
     SERVO_AVAILABLE = True
-    print("✓ Successfully imported ServoController")
+    print("Successfully imported ServoController")
 except ImportError as e:
     SERVO_AVAILABLE = False
-    print(f"⚠ Servo not available: {e}")
+    print(f"WARNING: Servo not available: {e}")
 
 def main():
     print("=== Forward Then Backward N20 Motor Test ===")
@@ -39,7 +39,7 @@ def main():
         if SERVO_AVAILABLE:
             servo = ServoController(pwm_pin=12)
             servo.set_angle(90)
-            print("✓ Servo set to angle 0")
+            print("Servo set to angle 0")
 
         # Create dual motor controller with standby pin
         controller = DualMotorController(standby_pin=22)
@@ -66,7 +66,7 @@ def main():
         controller.motor_a = motor1
         controller.motor_b = motor2
         
-        print("✓ Motors initialized!")
+        print("Motors initialized!")
         print("  Motor1 (Left): Inverted encoder")  
         print("  Motor2 (Right): Inverted encoder for differential drive")
         print()
@@ -178,7 +178,7 @@ def main():
         except Exception as e:
             print(f"Cleanup error: {e}")
 
-        print("✓ Motors stopped and GPIO cleaned up.")
+        print("Motors stopped and GPIO cleaned up.")
 
 if __name__ == '__main__':
     main()

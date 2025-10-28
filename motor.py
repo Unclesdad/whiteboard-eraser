@@ -24,9 +24,9 @@ import numpy as np
 # Use pigpio for better performance and Pi 5 compatibility
 try:
     Device.pin_factory = PiGPIOFactory()
-    print("✓ Using pigpio pin factory for better performance")
+    print("Using pigpio pin factory for better performance")
 except Exception as e:
-    print(f"⚠️  pigpio not available ({e}), using default pin factory")
+    print(f"WARNING: pigpio not available ({e}), using default pin factory")
     # Default pin factory will be used
 
 class N20Motor:
@@ -108,7 +108,7 @@ class N20Motor:
         
     def _setup_gpio(self, pwm_frequency):
         """Setup GPIO pins for motor control using gpiozero"""
-        print(f"🔧 Setting up gpiozero devices for {self.name}...")
+        print(f"Setting up gpiozero devices for {self.name}...")
 
         try:
             # Setup motor control devices
@@ -131,11 +131,11 @@ class N20Motor:
             # Note: Encoder pins will be setup by shared encoder thread
             print(f"  Encoder pins A={self.enc_a_pin}, B={self.enc_b_pin} registered for high-speed polling")
 
-            print(f"✓ {self.name} gpiozero setup complete")
+            print(f"{self.name} gpiozero setup complete")
 
         except Exception as e:
-            print(f"❌ gpiozero setup failed for {self.name}: {e}")
-            print("🔧 This could be due to:")
+            print(f"ERROR: gpiozero setup failed for {self.name}: {e}")
+            print("This could be due to:")
             print("   - gpiozero not installed: pip3 install gpiozero")
             print("   - GPIO pins already in use")
             print("   - Hardware connection issues")
@@ -152,7 +152,7 @@ class N20Motor:
         cls._running = True
         cls._encoder_thread = threading.Thread(target=cls._encoder_loop, daemon=True)
         cls._encoder_thread.start()
-        print(f"✓ High-speed encoder polling started at {cls._polling_freq}Hz")
+        print(f"High-speed encoder polling started at {cls._polling_freq}Hz")
 
     @classmethod
     def _encoder_loop(cls):
@@ -161,7 +161,7 @@ class N20Motor:
         Monitors all motor encoders simultaneously using quadrature decoding.
         Uses pre-created InputDevice objects for maximum speed.
         """
-        print(f"✓ Encoder polling thread started for gpiozero devices")
+        print(f"Encoder polling thread started for gpiozero devices")
 
         polling_interval = 1.0 / cls._polling_freq
         next_poll = time.perf_counter()
@@ -360,7 +360,7 @@ class N20Motor:
     
     def _print_hardware_info(self):
         """Print Raspberry Pi hardware information for diagnostics"""
-        print("🔍 Raspberry Pi Hardware Detection:")
+        print("Raspberry Pi Hardware Detection:")
 
         # Try to read Pi model from device tree
         pi_model = self._get_pi_model()
@@ -408,8 +408,8 @@ class N20Motor:
         error_str = str(error).lower()
 
         if "soc peripheral base address" in error_str:
-            print("  ⚠️  SOC peripheral base address error detected")
-            print("  🔧 This means RPi.GPIO can't detect your Pi hardware")
+            print("  WARNING: SOC peripheral base address error detected")
+            print("  This means RPi.GPIO can't detect your Pi hardware")
             print("  💡 Possible solutions:")
             print("     - Update RPi.GPIO: pip3 install --upgrade RPi.GPIO")
             print("     - Check Pi model compatibility with RPi.GPIO version")
@@ -422,21 +422,21 @@ class N20Motor:
 
             # Check if it's a known incompatible combination
             if "pi 5" in pi_model.lower():
-                print("     ⚠️  Raspberry Pi 5 requires RPi.GPIO >= 0.7.1 or gpiozero")
+                print("     WARNING: Raspberry Pi 5 requires RPi.GPIO >= 0.7.1 or gpiozero")
             elif "pi zero 2" in pi_model.lower():
-                print("     ⚠️  Pi Zero 2 W requires recent RPi.GPIO version")
+                print("     WARNING: Pi Zero 2 W requires recent RPi.GPIO version")
 
         elif "permission denied" in error_str:
-            print("  ⚠️  Permission denied - need sudo access")
-            print("  🔧 Run with: sudo python3 your_script.py")
+            print("  WARNING: Permission denied - need sudo access")
+            print("  Run with: sudo python3 your_script.py")
 
         elif "device or resource busy" in error_str:
-            print("  ⚠️  GPIO pins already in use by another process")
-            print("  🔧 Check for other running programs using GPIO")
+            print("  WARNING: GPIO pins already in use by another process")
+            print("  Check for other running programs using GPIO")
 
         else:
             print(f"  ❓ Unrecognized error pattern: {error}")
-            print("  🔧 Try checking wiring and pin numbers")
+            print("  Try checking wiring and pin numbers")
 
     def _try_fallback_gpio_init(self):
         """Try alternative GPIO initialization methods"""
@@ -446,18 +446,18 @@ class N20Motor:
         try:
             print("  Trying gpiozero library...")
             import gpiozero
-            print("  ✓ gpiozero available - consider switching to gpiozero for better compatibility")
+            print("  gpiozero available - consider switching to gpiozero for better compatibility")
             # Don't actually switch here, just report availability
             return False  # Still want to try other RPi.GPIO fixes
         except ImportError:
-            print("  ⚠️  gpiozero not available")
+            print("  WARNING: gpiozero not available")
 
         # Method 2: Try manual Pi detection and GPIO base setup
         pi_model = self._get_pi_model()
         print(f"  Attempting manual GPIO setup for: {pi_model}")
 
         if "pi 5" in pi_model.lower():
-            print("  ⚠️  Raspberry Pi 5 detected - RPi.GPIO may not be fully supported")
+            print("  WARNING: Raspberry Pi 5 detected - RPi.GPIO may not be fully supported")
             print("  💡 Consider using gpiozero: pip3 install gpiozero")
             return False
 
@@ -474,15 +474,15 @@ class N20Motor:
 
                         # Common hardware identifiers
                         if hardware in ['BCM2835', 'BCM2836', 'BCM2837', 'BCM2711']:
-                            print(f"  ✓ Recognized hardware: {hardware}")
+                            print(f"  Recognized hardware: {hardware}")
                             return True  # This should work with RPi.GPIO
                         else:
-                            print(f"  ⚠️  Unrecognized hardware: {hardware}")
+                            print(f"  WARNING: Unrecognized hardware: {hardware}")
 
         except Exception as e:
-            print(f"  ❌ Failed to read hardware info: {e}")
+            print(f"  ERROR: Failed to read hardware info: {e}")
 
-        print("  ❌ No successful fallback method found")
+        print("  ERROR: No successful fallback method found")
         return False
 
     def cleanup(self):
@@ -544,14 +544,14 @@ class DualMotorController:
         try:
             self.standby_device = OutputDevice(standby_pin)
             self.enable()
-            print(f"✓ Motor controller standby pin {standby_pin} configured with gpiozero")
+            print(f"Motor controller standby pin {standby_pin} configured with gpiozero")
         except Exception as e:
-            print(f"❌ CRITICAL: Motor controller standby pin setup failed: {e}")
-            print("🔧 This could be due to:")
+            print(f"ERROR: CRITICAL: Motor controller standby pin setup failed: {e}")
+            print("This could be due to:")
             print("   - gpiozero not installed: pip3 install gpiozero")
             print("   - GPIO pin already in use")
             print("   - Insufficient permissions")
-            print("\n🛑 Cannot operate motors without standby pin control")
+            print("\nCannot operate motors without standby pin control")
             raise RuntimeError("Motor controller gpiozero initialization failed")
 
         # Motor instances (to be set by user)
@@ -614,8 +614,8 @@ class EncoderManager:
 
     def __init__(self):
         """Initialize encoder manager (for backward compatibility)"""
-        print("⚠️  EncoderManager is deprecated - encoder management is now built into N20Motor")
-        print(f"✓ High-speed encoder polling active at {N20Motor._polling_freq}Hz")
+        print("WARNING: EncoderManager is deprecated - encoder management is now built into N20Motor")
+        print(f"High-speed encoder polling active at {N20Motor._polling_freq}Hz")
 
 
 # Example usage based on your wiring configuration
