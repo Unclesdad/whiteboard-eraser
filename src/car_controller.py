@@ -7,10 +7,15 @@ Integrates with existing motor.py, gyro.py, and servo.py hardware APIs
 
 import time
 import threading
+import sys
+import os
 import numpy as np
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from enum import Enum
+
+# Add parent directory to path for lib imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import hardware APIs
 try:

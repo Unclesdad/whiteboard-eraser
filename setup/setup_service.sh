@@ -46,6 +46,9 @@ if [ "$PROJECT_DIR" != "$INSTALL_DIR" ]; then
     # Copy src folder (Python files)
     cp -r "$PROJECT_DIR/src" "$INSTALL_DIR/"
 
+    # Copy lib folder (hardware modules)
+    cp -r "$PROJECT_DIR/lib" "$INSTALL_DIR/"
+
     # Copy other necessary files
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
         cp "$PROJECT_DIR/requirements.txt" "$INSTALL_DIR/"

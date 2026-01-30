@@ -91,20 +91,41 @@ Options:
 
 ## System Architecture
 
-### Core Modules (src/)
+```
+whiteboard-eraser/
+├── lib/                    # Hardware abstraction layer
+│   ├── motor.py
+│   ├── servo.py
+│   └── gyro.py
+├── src/                    # Algorithm and application code
+│   ├── whiteboard_eraser_main.py
+│   ├── car_controller.py
+│   ├── simple_marking_detector.py
+│   ├── localization.py
+│   ├── mapping.py
+│   ├── pathfinder.py
+│   └── ...
+└── setup/                  # Installation scripts
+```
 
-1. **simple_marking_detector.py** - Computer vision for detecting markings
-2. **localization.py** - Position tracking using encoders + gyro
-3. **mapping.py** - Global map of detected markings
-4. **pathfinder.py** - A* pathfinding with car constraints
-5. **car_controller.py** - PID control for smooth motion
-6. **whiteboard_eraser_main.py** - Main control loop
+### lib/ - Hardware Abstraction
 
-### Hardware APIs (src/lib/)
+Low-level drivers that interface directly with hardware. These abstract GPIO, I2C, and PWM into clean APIs.
 
-- **motor.py** - N20 motor control with encoders
-- **gyro.py** - MPU-6050 gyroscope integration
-- **servo.py** - Steering servo control
+- **motor.py** - N20 motor control with encoder reading
+- **gyro.py** - MPU-6050 gyroscope/accelerometer with sensor fusion
+- **servo.py** - Steering servo PWM control
+
+### src/ - Algorithms
+
+High-level application code that uses the hardware abstractions from `lib/`.
+
+- **whiteboard_eraser_main.py** - Main state machine and control loop
+- **car_controller.py** - PID control for position and heading
+- **simple_marking_detector.py** - Computer vision for detecting markings
+- **localization.py** - Position tracking using encoders + gyro fusion
+- **mapping.py** - Global map of detected markings with clustering
+- **pathfinder.py** - A* pathfinding with Ackermann steering constraints
 
 ## Operation States
 
