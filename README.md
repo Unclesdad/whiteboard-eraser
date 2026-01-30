@@ -1,4 +1,4 @@
-![Wiring Diagram](wiring_diagram.png)
+![Wiring Diagram](readme_images/wiring_diagram.png)
 
-![3d Model Screenshot](3d_model_screenshot.png)
+![3d Model Screenshot](readme_images/3d_model_screenshot.png)
 

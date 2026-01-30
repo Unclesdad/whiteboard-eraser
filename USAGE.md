@@ -14,7 +14,7 @@
 
 3. **Run the whiteboard eraser:**
    ```bash
-   python whiteboard_eraser_main.py
+   python src/whiteboard_eraser_main.py
    ```
 
 ## Auto-Start Setup (Plug and Play)
@@ -23,7 +23,7 @@ To set up the car to start automatically when powered on:
 
 1. **Install as a service:**
    ```bash
-   sudo ./setup_service.sh
+   sudo ./setup/setup_service.sh
    ```
 
 2. **Reboot the system:**
@@ -64,7 +64,7 @@ python test_system.py --integration
 
 ### Main System
 ```bash
-python whiteboard_eraser_main.py [options]
+python src/whiteboard_eraser_main.py [options]
 
 Options:
   --debug                 Enable debug mode with camera view
@@ -91,16 +91,16 @@ Options:
 
 ## System Architecture
 
-### Core Modules
+### Core Modules (src/)
 
-1. **marking_detector.py** - Computer vision for detecting markings
+1. **simple_marking_detector.py** - Computer vision for detecting markings
 2. **localization.py** - Position tracking using encoders + gyro
 3. **mapping.py** - Global map of detected markings
 4. **pathfinder.py** - A* pathfinding with car constraints
 5. **car_controller.py** - PID control for smooth motion
 6. **whiteboard_eraser_main.py** - Main control loop
 
-### Hardware APIs (Existing)
+### Hardware APIs (src/lib/)
 
 - **motor.py** - N20 motor control with encoders
 - **gyro.py** - MPU-6050 gyroscope integration

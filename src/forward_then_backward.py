@@ -11,16 +11,16 @@ import os
 
 # Try to import N20Motor with better error handling
 try:
-    from motor import N20Motor, DualMotorController, EncoderManager
+    from lib.motor import N20Motor, DualMotorController, EncoderManager
     print("Successfully imported N20Motor classes")
 except ImportError as e:
     print(f"✗ Import error: {e}")
-    print("Make sure motor.py contains the N20Motor classes")
+    print("Make sure lib/motor.py contains the N20Motor classes")
     sys.exit(1)
 
 # Try to import ServoController
 try:
-    from servo import ServoController
+    from lib.servo import ServoController
     SERVO_AVAILABLE = True
     print("Successfully imported ServoController")
 except ImportError as e:

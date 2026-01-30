@@ -14,9 +14,9 @@ from enum import Enum
 
 # Import hardware APIs
 try:
-    from motor import N20Motor, DualMotorController
-    from gyro import RCCarGyro
-    from servo import ServoController
+    from lib.motor import N20Motor, DualMotorController
+    from lib.gyro import RCCarGyro
+    from lib.servo import ServoController
     import RPi.GPIO as GPIO
 except ImportError:
     print("Warning: Hardware modules not available. Running in simulation mode.")

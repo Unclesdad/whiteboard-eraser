@@ -25,9 +25,11 @@ echo "Setting up for user: $REAL_USER"
 
 # Determine the installation directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALL_DIR="/home/$REAL_USER/whiteboard-eraser"
 
 echo "Script directory: $SCRIPT_DIR"
+echo "Project directory: $PROJECT_DIR"
 echo "Install directory: $INSTALL_DIR"
 
 # Create installation directory if it doesn't exist
@@ -38,19 +40,19 @@ if [ ! -d "$INSTALL_DIR" ]; then
 fi
 
 # Copy files to installation directory (if not already there)
-if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+if [ "$PROJECT_DIR" != "$INSTALL_DIR" ]; then
     echo "Copying files to installation directory..."
 
-    # Copy Python files
-    cp "$SCRIPT_DIR"/*.py "$INSTALL_DIR/"
+    # Copy src folder (Python files)
+    cp -r "$PROJECT_DIR/src" "$INSTALL_DIR/"
 
     # Copy other necessary files
-    if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
-        cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
+    if [ -f "$PROJECT_DIR/requirements.txt" ]; then
+        cp "$PROJECT_DIR/requirements.txt" "$INSTALL_DIR/"
     fi
 
-    if [ -f "$SCRIPT_DIR/README_USAGE.md" ]; then
-        cp "$SCRIPT_DIR/README_USAGE.md" "$INSTALL_DIR/"
+    if [ -f "$PROJECT_DIR/README_USAGE.md" ]; then
+        cp "$PROJECT_DIR/README_USAGE.md" "$INSTALL_DIR/"
     fi
 
     # Set ownership
@@ -82,11 +84,11 @@ else
 fi
 
 # Make Python files executable
-chmod +x "$INSTALL_DIR"/*.py
+chmod +x "$INSTALL_DIR"/src/*.py
 
 # Copy service file
 echo "Installing service file..."
-cp "$SCRIPT_DIR/whiteboard-eraser.service" /etc/systemd/system/
+cp "$PROJECT_DIR/whiteboard-eraser.service" /etc/systemd/system/
 
 # Update service file with correct paths
 sed -i "s|/home/pi/whiteboard-eraser|$INSTALL_DIR|g" /etc/systemd/system/whiteboard-eraser.service
