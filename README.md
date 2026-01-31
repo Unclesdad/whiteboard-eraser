@@ -1,6 +1,6 @@
 # Whiteboard Eraser
 
-An autonomous whiteboard eraser robot built on a Raspberry Pi 5. Uses computer vision to detect markings on a whiteboard and navigates to erase them.
+An autonomous whiteboard eraser robot built on a Raspberry Pi 5. Uses computer vision to detect markings on a whiteboard and navigates to erase them. Initially conceived as a handy and cool tool for our math teacher Mr. Perna, Mark is ready to vroom across surfaces and unmark any unwanted marks.
 
 ![Wiring Diagram](readme_images/wiring_diagram.png)
 
